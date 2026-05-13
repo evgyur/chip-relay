@@ -96,7 +96,7 @@ Never print cookie values, auth headers, browser profile contents, or local `.en
 ```bash
 scripts/chip-relay doctor
 scripts/chip-relay --json status
-bash -n scripts/chip-relay scripts/install-cloakbrowser.sh scripts/chip-relay-watchdog.sh
+bash -n scripts/chip-relay scripts/chip-relay.sh scripts/install-cloakbrowser.sh scripts/chip-relay-watchdog.sh
 python3 tests/test_public_hygiene.py
 python3 tests/test_shell_syntax.py
 ```
