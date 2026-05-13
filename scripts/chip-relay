@@ -1,0 +1,343 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+REPO_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"
+if [ -f "$REPO_DIR/.env" ]; then
+  set -a
+  # shellcheck disable=SC1091
+  . "$REPO_DIR/.env"
+  set +a
+fi
+
+BASE_DIR="${CHIP_RELAY_BASE_DIR:-$HOME/.local/share/chip-relay}"
+PROFILE="${CHIP_RELAY_PROFILE:-default}"
+PROFILE_DIR="${CHIP_RELAY_PROFILE_DIR:-$BASE_DIR/profiles/$PROFILE}"
+LOG_DIR="${CHIP_RELAY_LOG_DIR:-$BASE_DIR/logs}"
+STATE_FILE="${CHIP_RELAY_STATE_FILE:-$BASE_DIR/state.json}"
+HOST="${CHIP_RELAY_HOST:-127.0.0.1}"
+PORT="${CHIP_RELAY_PORT:-18800}"
+DISPLAY_VALUE="${CHIP_RELAY_DISPLAY:-${DISPLAY:-:1002}}"
+XAUTHORITY_VALUE="${CHIP_RELAY_XAUTHORITY:-${XAUTHORITY:-$HOME/.Xauthority}}"
+LAUNCH_TIMEOUT="${CHIP_RELAY_LAUNCH_TIMEOUT:-60}"
+HEADLESS="${CHIP_RELAY_HEADLESS:-0}"
+DEFAULT_BACKEND="${CHIP_RELAY_BACKEND:-auto}"
+FOREGROUND=0
+JSON=0
+BACKEND="$DEFAULT_BACKEND"
+
+mkdir -p "$BASE_DIR" "$PROFILE_DIR" "$LOG_DIR"
+
+usage() {
+  cat <<EOF
+chip-relay — switchable CDP browser rail
+
+Usage:
+  chip-relay [--json] <command> [args]
+  chip-relay launch [--backend auto|cloakbrowser|browseros|chromium] [--foreground]
+  chip-relay open URL
+  chip-relay status|doctor|tabs|health|kill
+
+Environment:
+  CHIP_RELAY_BACKEND=$DEFAULT_BACKEND
+  CHIP_RELAY_HOST=$HOST
+  CHIP_RELAY_PORT=$PORT
+  CHIP_RELAY_PROFILE_DIR=$PROFILE_DIR
+EOF
+}
+
+json_escape() {
+  python3 - "$1" <<'PY'
+import json, sys
+print(json.dumps(sys.argv[1], ensure_ascii=False))
+PY
+}
+
+emit_json() {
+  local status="$1" message="$2" extra="${3:-{}}"
+  python3 - "$status" "$message" "$extra" <<'PY'
+import json, sys
+status, message, extra = sys.argv[1:4]
+try:
+    payload = json.loads(extra)
+except Exception:
+    payload = {"raw": extra}
+payload.update({"status": status, "message": message})
+print(json.dumps(payload, ensure_ascii=False, indent=2))
+PY
+}
+
+write_state() {
+  local backend="$1" state="$2" detail="${3:-}"
+  python3 - "$STATE_FILE" "$backend" "$state" "$detail" "$HOST" "$PORT" "$PROFILE_DIR" <<'PY'
+import json, os, sys, time
+path, backend, state, detail, host, port, profile = sys.argv[1:8]
+os.makedirs(os.path.dirname(path), exist_ok=True)
+payload = {
+  "updatedAt": int(time.time()),
+  "backend": backend,
+  "state": state,
+  "detail": detail,
+  "host": host,
+  "port": int(port),
+  "profileDir": profile,
+}
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(payload, f, ensure_ascii=False, indent=2)
+PY
+}
+
+wait_http() {
+  local url="$1" timeout="${2:-20}" start now
+  start="$(date +%s)"
+  while true; do
+    if curl -fsS --max-time 2 "$url" >/dev/null 2>&1; then
+      return 0
+    fi
+    now="$(date +%s)"
+    [ $((now - start)) -ge "$timeout" ] && return 1
+    sleep 0.5
+  done
+}
+
+check_cdp() {
+  curl -fsS --max-time 2 "http://$HOST:$PORT/json/version" >/dev/null 2>&1
+}
+
+pick_bin() {
+  local env_name="$1" fallback_names="$2" explicit=""
+  case "$env_name" in
+    CHIP_RELAY_CLOAK_BIN) explicit="${CHIP_RELAY_CLOAK_BIN:-}" ;;
+    CHIP_RELAY_BROWSEROS_BIN) explicit="${CHIP_RELAY_BROWSEROS_BIN:-}" ;;
+    CHIP_RELAY_CHROMIUM_BIN) explicit="${CHIP_RELAY_CHROMIUM_BIN:-}" ;;
+  esac
+  if [ -n "$explicit" ] && [ -x "$explicit" ]; then
+    printf '%s\n' "$explicit"
+    return 0
+  fi
+  local name
+  for name in $fallback_names; do
+    if command -v "$name" >/dev/null 2>&1; then
+      command -v "$name"
+      return 0
+    fi
+  done
+  return 1
+}
+
+pick_cloakbrowser() {
+  pick_bin CHIP_RELAY_CLOAK_BIN "cloakbrowser-chrome"
+}
+
+pick_browseros() {
+  pick_bin CHIP_RELAY_BROWSEROS_BIN "browseros"
+}
+
+pick_chromium() {
+  pick_bin CHIP_RELAY_CHROMIUM_BIN "chromium chromium-browser google-chrome google-chrome-stable"
+}
+
+backend_bin() {
+  local backend="$1"
+  case "$backend" in
+    cloakbrowser) pick_cloakbrowser ;;
+    browseros) pick_browseros ;;
+    chromium) pick_chromium ;;
+    *) return 1 ;;
+  esac
+}
+
+current_owner() {
+  python3 - "$PORT" <<'PY'
+import glob, sys
+port = sys.argv[1]
+needle = f"--remote-debugging-port={port}"
+for p in glob.glob('/proc/[0-9]*/cmdline'):
+    try:
+        data = open(p, 'rb').read().decode('utf-8', 'ignore').replace('\0', ' ')
+    except Exception:
+        continue
+    if needle in data:
+        print(data.strip())
+        break
+PY
+}
+
+ensure_display() {
+  [ "$HEADLESS" = "1" ] && return 0
+  if command -v xdpyinfo >/dev/null 2>&1 && xdpyinfo -display "$DISPLAY_VALUE" >/dev/null 2>&1; then
+    return 0
+  fi
+  if ! command -v Xvfb >/dev/null 2>&1; then
+    echo "DISPLAY $DISPLAY_VALUE unavailable and Xvfb not installed" >&2
+    return 1
+  fi
+  local display_num="${DISPLAY_VALUE#:}"
+  rm -f "/tmp/.X${display_num}-lock" 2>/dev/null || true
+  Xvfb "$DISPLAY_VALUE" -screen 0 1920x1080x24 -nolisten tcp >"$LOG_DIR/xvfb.log" 2>&1 &
+  for _ in $(seq 1 40); do
+    if xdpyinfo -display "$DISPLAY_VALUE" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.25
+  done
+  return 1
+}
+
+launch_backend() {
+  local backend="$1" bin log args=()
+  bin="$(backend_bin "$backend")" || return 1
+  log="$LOG_DIR/$backend.log"
+
+  args+=(--remote-debugging-address="$HOST")
+  args+=(--remote-debugging-port="$PORT")
+  args+=(--user-data-dir="$PROFILE_DIR")
+  args+=(--no-first-run --no-default-browser-check --disable-dev-shm-usage)
+  if [ "$HEADLESS" = "1" ]; then
+    args+=(--headless=new)
+  else
+    ensure_display
+  fi
+  args+=(about:blank)
+
+  write_state "$backend" "launching" "$bin"
+  if [ "$FOREGROUND" -eq 1 ]; then
+    exec env DISPLAY="$DISPLAY_VALUE" XAUTHORITY="$XAUTHORITY_VALUE" "$bin" "${args[@]}"
+  fi
+  setsid env DISPLAY="$DISPLAY_VALUE" XAUTHORITY="$XAUTHORITY_VALUE" "$bin" "${args[@]}" >>"$log" 2>&1 &
+  disown || true
+  wait_http "http://$HOST:$PORT/json/version" "$LAUNCH_TIMEOUT"
+  write_state "$backend" "up" "$bin"
+}
+
+resolve_backend_order() {
+  case "$BACKEND" in
+    auto) printf '%s\n' cloakbrowser browseros chromium ;;
+    cloakbrowser|browseros|chromium) printf '%s\n' "$BACKEND" ;;
+    *) echo "unknown backend: $BACKEND" >&2; return 2 ;;
+  esac
+}
+
+cmd_launch() {
+  if check_cdp; then
+    write_state "existing" "up" "already-running"
+    cmd_status
+    return 0
+  fi
+  local b
+  while IFS= read -r b; do
+    if launch_backend "$b"; then
+      cmd_status
+      return 0
+    fi
+  done < <(resolve_backend_order)
+  write_state "$BACKEND" "error" "no-backend-started"
+  return 1
+}
+
+cmd_status() {
+  local cdp_state="down" owner="" version="{}"
+  if check_cdp; then
+    cdp_state="up"
+    version="$(curl -fsS --max-time 2 "http://$HOST:$PORT/json/version" || printf '{}')"
+  fi
+  owner="$(current_owner || true)"
+  if [ "$JSON" -eq 1 ]; then
+    python3 - "$cdp_state" "$owner" "$version" "$HOST" "$PORT" "$PROFILE_DIR" "$STATE_FILE" <<'PY'
+import json, sys
+cdp_state, owner, version_raw, host, port, profile, state_file = sys.argv[1:8]
+try: version = json.loads(version_raw)
+except Exception: version = {}
+print(json.dumps({
+  "cdp": {"state": cdp_state, "url": f"http://{host}:{port}", "version": version},
+  "ownerCmdline": owner,
+  "profileDir": profile,
+  "stateFile": state_file,
+}, ensure_ascii=False, indent=2))
+PY
+  else
+    echo "chip-relay"
+    echo "- cdp: $cdp_state http://$HOST:$PORT"
+    echo "- backend preference: $BACKEND"
+    echo "- profile: $PROFILE_DIR"
+    [ -n "$owner" ] && { echo "- owner:"; echo "$owner"; }
+  fi
+}
+
+cmd_doctor() {
+  echo "chip-relay doctor"
+  echo "- cloakbrowser: $(pick_cloakbrowser 2>/dev/null || echo missing)"
+  echo "- browseros: $(pick_browseros 2>/dev/null || echo missing)"
+  echo "- chromium: $(pick_chromium 2>/dev/null || echo missing)"
+  echo "- curl: $(command -v curl || echo missing)"
+  echo "- python3: $(command -v python3 || echo missing)"
+  echo "- Xvfb: $(command -v Xvfb || echo optional-missing)"
+  echo "- display: $DISPLAY_VALUE"
+  echo "- cdp: $(check_cdp && echo up || echo down)"
+}
+
+cmd_tabs() {
+  curl -fsS --max-time 3 "http://$HOST:$PORT/json/list"
+}
+
+cmd_open() {
+  local url="${1:-https://example.com}"
+  check_cdp || cmd_launch >/dev/null
+  python3 - "$HOST" "$PORT" "$url" <<'PY'
+import json, sys, urllib.parse, urllib.request
+host, port, url = sys.argv[1:4]
+q = urllib.parse.quote(url, safe=':/?&=#%+,-_.~')
+req = urllib.request.Request(f'http://{host}:{port}/json/new?{q}', method='PUT')
+with urllib.request.urlopen(req, timeout=10) as r:
+    print(r.read().decode('utf-8', 'ignore'))
+PY
+}
+
+cmd_health() {
+  local probe="https://example.com/?chip_relay_health=$(date +%s)"
+  cmd_open "$probe" >/dev/null
+  if check_cdp; then
+    [ "$JSON" -eq 1 ] && emit_json ok "health ok" "{\"probeUrl\":$(json_escape "$probe")}" || echo "HEALTH_OK"
+  else
+    [ "$JSON" -eq 1 ] && emit_json error "health failed" || echo "HEALTH_FAIL"
+    return 1
+  fi
+}
+
+cmd_kill() {
+  pkill -f -- "--remote-debugging-port=$PORT" >/dev/null 2>&1 || true
+  write_state "$BACKEND" "stopped" "kill"
+  [ "$JSON" -eq 1 ] && emit_json ok "stopped" || echo "stopped"
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --json) JSON=1; shift ;;
+    --backend) BACKEND="${2:-auto}"; shift 2 ;;
+    --foreground) FOREGROUND=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) break ;;
+  esac
+done
+
+cmd="${1:-status}"
+shift || true
+case "$cmd" in
+  launch|start)
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --backend) BACKEND="${2:-auto}"; shift 2 ;;
+        --foreground) FOREGROUND=1; shift ;;
+        *) echo "unknown launch arg: $1" >&2; exit 2 ;;
+      esac
+    done
+    cmd_launch ;;
+  status) cmd_status ;;
+  doctor) cmd_doctor ;;
+  tabs) cmd_tabs ;;
+  open|navigate) cmd_open "${1:-https://example.com}" ;;
+  health) cmd_health ;;
+  kill|stop) cmd_kill ;;
+  help) usage ;;
+  *) usage >&2; exit 2 ;;
+esac

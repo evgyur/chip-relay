@@ -1,0 +1,31 @@
+name: ci
+on:
+  push:
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Public hygiene
+        run: python3 tests/test_public_hygiene.py
+      - name: Shell syntax
+        run: python3 tests/test_shell_syntax.py
+      - name: Skill guard
+        run: |
+          python3 - <<'PY'
+          import pathlib
+          p = pathlib.Path('SKILL.md').read_text()
+          assert p.startswith('---\n')
+          front = p.split('---', 2)[1]
+          fields = {}
+          for line in front.splitlines():
+              if ':' in line and not line.startswith(' '):
+                  k, v = line.split(':', 1)
+                  fields[k.strip()] = v.strip().strip('"')
+          assert fields.get('name') == 'chip-relay'
+          assert fields.get('description') and len(fields['description']) <= 1024
+          PY

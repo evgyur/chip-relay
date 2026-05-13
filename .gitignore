@@ -1,0 +1,15 @@
+.env
+*.log
+logs/
+profiles/
+state.json
+*.sqlite
+*.db
+*.db-shm
+*.db-wal
+__pycache__/
+.pytest_cache/
+.DS_Store
+.cloakbrowser/
+cloakbrowser-cache/
+cloakbrowser-venv/
