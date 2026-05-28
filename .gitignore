@@ -9,6 +9,11 @@ state.json
 *.db-wal
 __pycache__/
 .pytest_cache/
+runs/
+recipes/*/artifacts/
+playwright-report/
+test-results/
+*.trace.zip
 .DS_Store
 .cloakbrowser/
 cloakbrowser-cache/

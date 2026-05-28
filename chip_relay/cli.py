@@ -1,0 +1,222 @@
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+from .config import load_config
+from .playwright_runner import doctor_webwright, run_final_script
+from .recipes import list_recipes, load_recipe, pack_run, parse_params, prepare_recipe_run
+from .verifier import verify_run
+from .workspace import init_run, list_runs, load_manifest, resolve_run
+
+
+def emit(payload: object, *, json_mode: bool) -> None:
+    if json_mode:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        if isinstance(payload, dict):
+            for key, value in payload.items():
+                print(f"{key}: {value}")
+        else:
+            print(payload)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="chip-relay-python")
+    parser.add_argument("--json", action="store_true", dest="json_mode")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    task = sub.add_parser("task")
+    task_sub = task.add_subparsers(dest="task_command", required=True)
+
+    init = task_sub.add_parser("init")
+    init.add_argument("title", nargs="+")
+    init.add_argument("--id", dest="run_id")
+    init.add_argument("--template", choices=["placeholder", "example-title"], default="placeholder")
+
+    task_sub.add_parser("list")
+
+    show = task_sub.add_parser("show")
+    show.add_argument("run")
+
+    verify = task_sub.add_parser("verify")
+    verify.add_argument("run")
+    verify.add_argument("--strength", choices=["same-rail", "fresh-context", "clean-ci"], default="same-rail")
+
+    run = task_sub.add_parser("run")
+    run.add_argument("run")
+    run.add_argument("--verify", action="store_true")
+
+    pack = task_sub.add_parser("pack")
+    pack.add_argument("run")
+    pack.add_argument("--name", required=True)
+    pack.add_argument("--force", action="store_true")
+
+    doctor = sub.add_parser("doctor")
+    doctor.add_argument("topic", nargs="?", default="webwright", choices=["webwright", "playwright"])
+
+    recipe = sub.add_parser("recipe")
+    recipe_sub = recipe.add_subparsers(dest="recipe_command", required=True)
+    recipe_sub.add_parser("list")
+    recipe_show = recipe_sub.add_parser("show")
+    recipe_show.add_argument("name")
+    recipe_run = recipe_sub.add_parser("run")
+    recipe_run.add_argument("name")
+    recipe_run.add_argument("--param", action="append", default=[])
+    recipe_run.add_argument("--verify", action="store_true")
+    return parser
+
+
+def cmd_task(args: argparse.Namespace) -> int:
+    config = load_config()
+    if args.task_command == "init":
+        title = " ".join(args.title).strip()
+        if not title:
+            raise SystemExit("task title is required")
+        run = init_run(config, title, run_id=args.run_id, template=args.template)
+        emit({
+            "status": run.manifest["status"],
+            "run_id": run.run_id,
+            "run_dir": str(run.run_dir),
+            "manifest": str(run.run_dir / "manifest.json"),
+            "final_script": str(run.run_dir / "scripts" / "final.py"),
+            "template": args.template,
+        }, json_mode=args.json_mode)
+        return 0
+    if args.task_command == "list":
+        emit({"runs": list_runs(config)}, json_mode=args.json_mode)
+        return 0
+    if args.task_command == "show":
+        run_dir = resolve_run(config, args.run)
+        manifest = load_manifest(run_dir)
+        if args.json_mode:
+            print(json.dumps(manifest, ensure_ascii=False, indent=2))
+        else:
+            print(f"run: {manifest.get('run_id')}")
+            print(f"status: {manifest.get('status')}")
+            print(f"title: {(manifest.get('task') or {}).get('title', '')}")
+            print(f"path: {run_dir}")
+        return 0
+    if args.task_command == "verify":
+        run_dir = resolve_run(config, args.run)
+        result = verify_run(run_dir, strength=args.strength)
+        payload = result.as_dict()
+        if args.json_mode:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            print(f"run: {payload['run_id']}")
+            print(f"status: {payload['status']}")
+            print(f"verification: {payload['verification_strength']}")
+            if payload.get("failed_gate"):
+                print(f"failed_gate: {payload['failed_gate']}")
+        return 0 if result.status == "verified" else 1
+    if args.task_command == "run":
+        run_dir = resolve_run(config, args.run)
+        result = run_final_script(run_dir, config=config)
+        payload = result.as_dict()
+        if args.verify and result.status == "ran":
+            verify_result = verify_run(run_dir, strength="same-rail")
+            payload["verification"] = verify_result.as_dict()
+            if verify_result.status == "verified":
+                payload["status"] = "verified"
+            else:
+                payload["status"] = "failed"
+                payload["failed_gate"] = verify_result.failed_gate
+        if args.json_mode:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            print(f"run: {payload['run_id']}")
+            print(f"status: {payload['status']}")
+            print(f"exit_code: {payload['exit_code']}")
+            if payload.get("failed_gate"):
+                print(f"failed_gate: {payload['failed_gate']}")
+        return 0 if payload["status"] in {"ran", "verified"} else 1
+    if args.task_command == "pack":
+        run_dir = resolve_run(config, args.run)
+        result = pack_run(config, run_dir, name=args.name, force=args.force)
+        payload = result.as_dict()
+        if args.json_mode:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            print(f"run: {payload['run_id']}")
+            print(f"status: {payload['status']}")
+            print(f"recipe: {payload['recipe_name']}")
+            if payload.get("recipe_dir"):
+                print(f"recipe_dir: {payload['recipe_dir']}")
+            if payload.get("failed_gate"):
+                print(f"failed_gate: {payload['failed_gate']}")
+        return 0 if result.status == "packed" else 1
+    raise SystemExit(f"unknown task command: {args.task_command}")
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    config = load_config()
+    payload = doctor_webwright(config)
+    if args.json_mode:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print("chip-relay doctor webwright")
+        for name, check in payload["checks"].items():
+            marker = "ok" if check.get("ok") else "fail"
+            print(f"- {name}: {marker}")
+    return 0 if payload["status"] == "ok" else 1
+
+
+def cmd_recipe(args: argparse.Namespace) -> int:
+    config = load_config()
+    if args.recipe_command == "list":
+        payload = {"recipes": list_recipes(config)}
+        emit(payload, json_mode=args.json_mode)
+        return 0
+    if args.recipe_command == "show":
+        payload = load_recipe(config, args.name)
+        if args.json_mode:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            print(f"recipe: {payload.get('name')}")
+            print(f"recipe_dir: {payload.get('recipe_dir')}")
+            print(f"source_run_id: {payload.get('source_run_id')}")
+        return 0
+    if args.recipe_command == "run":
+        params = parse_params(args.param)
+        run_id, run_dir = prepare_recipe_run(config, args.name, params=params)
+        result = run_final_script(run_dir, config=config)
+        payload = result.as_dict()
+        payload["run_id"] = run_id
+        payload["params"] = params
+        if args.verify and result.status == "ran":
+            verify_result = verify_run(run_dir, strength="same-rail")
+            payload["verification"] = verify_result.as_dict()
+            if verify_result.status == "verified":
+                payload["status"] = "verified"
+            else:
+                payload["status"] = "failed"
+                payload["failed_gate"] = verify_result.failed_gate
+        if args.json_mode:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            print(f"run: {payload['run_id']}")
+            print(f"status: {payload['status']}")
+            print(f"run_dir: {payload['run_dir']}")
+            if payload.get("failed_gate"):
+                print(f"failed_gate: {payload['failed_gate']}")
+        return 0 if payload["status"] in {"ran", "verified"} else 1
+    raise SystemExit(f"unknown recipe command: {args.recipe_command}")
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.command == "task":
+        return cmd_task(args)
+    if args.command == "doctor":
+        return cmd_doctor(args)
+    if args.command == "recipe":
+        return cmd_recipe(args)
+    raise SystemExit(f"unknown command: {args.command}")
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

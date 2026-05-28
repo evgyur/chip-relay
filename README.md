@@ -80,6 +80,52 @@ scripts/chip-relay health
 scripts/chip-relay kill
 ```
 
+## Webwright-style task factory
+
+`chip-relay` creates durable browser task workspaces and now has the first reproducible loop:
+
+```text
+task workspace -> final.py -> run logs/artifacts -> verify gate -> packed recipe
+```
+
+```bash
+scripts/chip-relay task init "example title smoke"
+scripts/chip-relay task init "example title smoke" --template example-title
+scripts/chip-relay task run <run_id>
+scripts/chip-relay task verify <run_id>
+scripts/chip-relay task pack <run_id> --name example-title
+scripts/chip-relay task list
+scripts/chip-relay task show <run_id>
+
+scripts/chip-relay recipe list
+scripts/chip-relay recipe show example-title
+scripts/chip-relay recipe run example-title --param month=2026-05
+
+scripts/chip-relay --json doctor webwright
+```
+
+Default runtime paths:
+
+```text
+~/.local/share/chip-relay/runs/<run_id>/
+├── task.md
+├── manifest.json
+├── scripts/final.py
+├── logs/
+├── screenshots/
+├── traces/
+├── results/
+└── verification/
+```
+
+`task run` executes `scripts/final.py` once, captures `logs/run.log`, injects `CHIP_RELAY_CDP_URL`, and marks the manifest `ran` or `failed`.
+
+`task verify` is the completion gate. It compiles and runs `scripts/final.py`, captures `logs/verify.log`, requires final logs/results or screenshots, writes `verification/verify-result.json`, runs a hygiene scan into `verification/hygiene-report.json`, and updates `manifest.json` to `verified` or `failed`. It reports verification strength as `same-rail` by default.
+
+`--template example-title` generates a Playwright/CDP smoke script that connects to `http://127.0.0.1:18800`, opens `example.com`, writes `results/result.json`, and saves `screenshots/999-final.png`. The default template stays placeholder-safe for CI and offline development.
+
+`task pack` only packs verified runs. It copies `final.py` and `recipe.json` into `~/.local/share/chip-relay/recipes/<name>/`; it does not copy logs, screenshots, traces, results, or profile data.
+
 ## Backend switching
 
 Switching is just relaunching with a different backend:
