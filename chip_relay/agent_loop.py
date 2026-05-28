@@ -47,6 +47,18 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+def _agent_command_tokens(agent_command: str) -> list[str]:
+    tokens = shlex.split(agent_command)
+    if not tokens:
+        return tokens
+    executable = Path(tokens[0]).expanduser()
+    if not executable.is_absolute() and ("/" in tokens[0] or tokens[0].startswith(".")):
+        candidate = (Path.cwd() / executable).resolve()
+        if candidate.exists():
+            tokens[0] = str(candidate)
+    return tokens
+
+
 def _update_manifest(run_dir: Path, result: AgentLoopResult) -> None:
     manifest = load_manifest(run_dir)
     manifest["updated_at"] = utc_now_text()
@@ -109,7 +121,7 @@ def run_agent_loop(
         env["CHIP_RELAY_RUN_DIR"] = str(run_dir)
         env["CHIP_RELAY_CDP_URL"] = config.cdp_url
         proc = subprocess.run(
-            shlex.split(agent_command),
+            _agent_command_tokens(agent_command),
             cwd=run_dir,
             env=env,
             text=True,

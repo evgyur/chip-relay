@@ -1,0 +1,78 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import json
+import os
+import pathlib
+import sys
+import textwrap
+
+
+def fail(message: str) -> int:
+    print(message, file=sys.stderr)
+    return 2
+
+
+def main() -> int:
+    context_path = os.environ.get("CHIP_RELAY_AGENT_CONTEXT")
+    if not context_path:
+        return fail("CHIP_RELAY_AGENT_CONTEXT is required")
+
+    context_file = pathlib.Path(context_path)
+    try:
+        context = json.loads(context_file.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return fail(f"failed to read CHIP_RELAY_AGENT_CONTEXT: {exc}")
+
+    if context.get("schema") != "chip-relay-agent-context-v1":
+        return fail("unsupported agent context schema")
+
+    run_dir = pathlib.Path(context["run_dir"]).resolve()
+    final_script = run_dir / "scripts" / "final.py"
+    task_title = (context.get("task") or {}).get("title", "browser task")
+
+    source = f'''#!/usr/bin/env python3
+from __future__ import annotations
+
+import json
+import pathlib
+import time
+
+RUN_DIR = pathlib.Path(__file__).resolve().parents[1]
+LOG_DIR = RUN_DIR / "logs"
+RESULT_DIR = RUN_DIR / "results"
+
+for directory in (LOG_DIR, RESULT_DIR):
+    directory.mkdir(parents=True, exist_ok=True)
+
+
+def log(message: str) -> None:
+    line = f"{{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}} {{message}}"
+    print(line, flush=True)
+    with open(LOG_DIR / "final.log", "a", encoding="utf-8") as handle:
+        handle.write(line + "\\n")
+
+
+def main() -> int:
+    result = {{
+        "status": "generated-by-chip-relay-agent-example",
+        "task": {json.dumps(task_title, ensure_ascii=False)},
+        "note": "public-safe deterministic agent example; replace with your private LLM command",
+    }}
+    (RESULT_DIR / "result.json").write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\\n", encoding="utf-8")
+    log("wrote deterministic public-safe result.json")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+'''
+    final_script.parent.mkdir(parents=True, exist_ok=True)
+    final_script.write_text(source, encoding="utf-8")
+    final_script.chmod(0o755)
+    print(f"wrote {final_script.relative_to(run_dir)}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
