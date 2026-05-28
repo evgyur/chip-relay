@@ -297,16 +297,24 @@ def cmd_recipe(args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    if args.command == "task":
-        return cmd_task(args)
-    if args.command == "doctor":
-        return cmd_doctor(args)
-    if args.command == "artifacts":
-        return cmd_artifacts(args)
-    if args.command == "relay":
-        return cmd_relay(args)
-    if args.command == "recipe":
-        return cmd_recipe(args)
+    try:
+        if args.command == "task":
+            return cmd_task(args)
+        if args.command == "doctor":
+            return cmd_doctor(args)
+        if args.command == "artifacts":
+            return cmd_artifacts(args)
+        if args.command == "relay":
+            return cmd_relay(args)
+        if args.command == "recipe":
+            return cmd_recipe(args)
+    except ValueError as exc:
+        message = str(exc)
+        gate = message.split(":", 1)[0] or "value_error"
+        if args.json_mode:
+            print(json.dumps({"status": "failed", "failed_gate": gate, "message": message}, ensure_ascii=False, indent=2))
+            return 1
+        raise SystemExit(message) from exc
     raise SystemExit(f"unknown command: {args.command}")
 
 

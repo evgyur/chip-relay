@@ -138,7 +138,9 @@ output: write or update runs/<id>/scripts/final.py plus any private-local artifa
 rule:   do not dump cookies, auth headers, browser profiles, or raw tokens
 ```
 
-`task verify` is the completion gate. It compiles and runs `scripts/final.py`, captures `logs/verify.log`, requires final logs/results or screenshots, writes `verification/verify-result.json`, runs a hygiene scan into `verification/hygiene-report.json`, and updates `manifest.json` to `verified` or `failed`. It reports verification strength as `same-rail` by default.
+`task verify` is the completion gate. It compiles and runs `scripts/final.py`, captures a redacted `logs/verify.log`, requires fresh final logs/results or screenshots from the current verify attempt, writes `verification/verify-result.json`, runs a hygiene scan into `verification/hygiene-report.json`, and updates `manifest.json` to `verified` or `failed`. It currently implements `same-rail`; unimplemented strengths fail closed instead of pretending isolation.
+
+Hardening rules: run IDs cannot contain path components or escape `runs_dir`; browser cookie/profile dumps (`Cookies`, `Local State`, SQLite DBs, HARs, symlinks) fail hygiene; agent command failures return structured gates such as `agent_command_not_found` or `agent_command_timeout`.
 
 `task show` is the production adapter report: compact operator evidence only (run, rail, local CDP label, verification, artifact count, hygiene, blocker). `artifacts <run_id>` and `task artifacts <run_id>` return metadata-only artifact indexes with paths, sizes, and sensitivity. They do not print file contents and authenticated artifacts stay `private-local/no-auto-send` unless a separate policy-cleared export is added.
 

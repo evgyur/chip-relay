@@ -16,6 +16,13 @@ DENY_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
 ]
 
 TEXT_SUFFIXES = {".txt", ".log", ".json", ".md", ".py", ".yaml", ".yml", ""}
+DENY_PATH_NAMES = {
+    "cookies",
+    "login data",
+    "local state",
+    "storage_state.json",
+}
+DENY_PATH_SUFFIXES = {".sqlite", ".sqlite3", ".db", ".har"}
 
 
 @dataclass(frozen=True)
@@ -46,10 +53,37 @@ def scan_text(text: str, rel_path: str) -> list[HygieneFinding]:
     return findings
 
 
+def path_findings(path: Path, root: Path) -> list[HygieneFinding]:
+    rel = str(path.relative_to(root))
+    parts = {part.lower() for part in path.relative_to(root).parts}
+    findings: list[HygieneFinding] = []
+    if path.is_symlink():
+        findings.append(HygieneFinding(path=rel, pattern="symlink_artifact"))
+    if parts & DENY_PATH_NAMES:
+        findings.append(HygieneFinding(path=rel, pattern="browser_profile_artifact"))
+    if path.suffix.lower() in DENY_PATH_SUFFIXES:
+        findings.append(HygieneFinding(path=rel, pattern="browser_database_or_har_artifact"))
+    try:
+        with path.open("rb") as handle:
+            if handle.read(16).startswith(b"SQLite format 3"):
+                findings.append(HygieneFinding(path=rel, pattern="sqlite_artifact"))
+    except OSError:
+        pass
+    return findings
+
+
 def scan_path(root: Path) -> dict[str, object]:
     findings: list[HygieneFinding] = []
     scanned = 0
-    for path in iter_scannable_files(root):
+    for path in root.rglob("*"):
+        hidden_path = any(part.startswith(".") for part in path.relative_to(root).parts)
+        findings.extend(path_findings(path, root))
+        if path.is_symlink() or path.is_dir():
+            continue
+        if hidden_path:
+            continue
+        if path.suffix not in TEXT_SUFFIXES:
+            continue
         try:
             text = path.read_text(encoding="utf-8")
         except UnicodeDecodeError:

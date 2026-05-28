@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from .config import RelayConfig
 from .workspace import load_manifest
@@ -11,7 +12,8 @@ ARTIFACT_POLICY = "private-local/no-auto-send"
 
 
 def _local_cdp_label(cdp_url: str) -> str:
-    if "127.0.0.1" in cdp_url or "localhost" in cdp_url:
+    hostname = urlparse(cdp_url).hostname
+    if hostname in {"127.0.0.1", "::1", "localhost"}:
         return "local-only"
     return "configured"
 
