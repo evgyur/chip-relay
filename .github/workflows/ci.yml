@@ -12,6 +12,16 @@ jobs:
           python-version: '3.12'
       - name: Public hygiene
         run: python3 tests/test_public_hygiene.py
+      - name: Python compile
+        run: python3 -m py_compile chip_relay/*.py
+      - name: Task workspace tests
+        run: python3 tests/test_task_workspace.py
+      - name: Task verify tests
+        run: python3 tests/test_task_verify.py
+      - name: Task run/pack tests
+        run: python3 tests/test_task_run_pack.py
+      - name: Recipe command tests
+        run: python3 tests/test_recipe_commands.py
       - name: Shell syntax
         run: python3 tests/test_shell_syntax.py
       - name: Skill guard
