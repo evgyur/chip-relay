@@ -85,13 +85,15 @@ scripts/chip-relay kill
 `chip-relay` creates durable browser task workspaces and now has the first reproducible loop:
 
 ```text
-task workspace -> agent context -> final.py -> verify feedback loop -> packed recipe
+task workspace -> Hermes context -> final.py -> verify feedback loop -> packed recipe
 ```
 
 ```bash
 scripts/chip-relay task init "example title smoke"
 scripts/chip-relay task init "example title smoke" --template example-title
 scripts/chip-relay task run <run_id>
+scripts/chip-relay task context <run_id>
+scripts/chip-relay task context <run_id> --write
 scripts/chip-relay task loop <run_id> --agent-command "python3 /path/to/agent.py" --max-attempts 3
 scripts/chip-relay task loop <run_id> --agent-command scripts/chip-relay-agent-example --max-attempts 1
 scripts/chip-relay task verify <run_id>
@@ -126,7 +128,9 @@ Default runtime paths:
 
 `task run` executes `scripts/final.py` once, captures `logs/run.log`, injects `CHIP_RELAY_CDP_URL`, and marks the manifest `ran` or `failed`.
 
-`task loop` is the public-safe agent bridge. It writes `agent/request-NNN.json`, runs the external `--agent-command` with `CHIP_RELAY_AGENT_CONTEXT`, then calls `task verify`. If verification fails, the next request includes the redacted previous failure under `previous_result`. Loop artifacts stay inside `agent/`: request JSON, feedback JSON, redacted command logs, and `loop-result.json`.
+`task context` is the Hermes-native workflow primitive. It returns `chip-relay-hermes-workflow-context-v1`: task, rail, editable files, verify/show/artifacts commands, current verification state, evidence summary, and metadata-only artifact paths. This is the preferred integration when Hermes itself is the agent: Hermes edits `scripts/final.py`, runs `task verify`, reads structured feedback/evidence, and never sends artifact contents to chat by default. `--write` stores the same context at `agent/hermes-context.json` for repeatable handoff.
+
+`task loop` is the public-safe external-agent bridge. It writes `agent/request-NNN.json`, runs the external `--agent-command` with `CHIP_RELAY_AGENT_CONTEXT`, then calls `task verify`. If verification fails, the next request includes the redacted previous failure under `previous_result`. Loop artifacts stay inside `agent/`: request JSON, feedback JSON, redacted command logs, and `loop-result.json`.
 
 `scripts/chip-relay-agent-example` is a bundled deterministic external-agent example. It reads `CHIP_RELAY_AGENT_CONTEXT`, writes a public-safe `scripts/final.py`, and lets `task loop` complete without any LLM provider. Replace it with a private command such as a Hermes/OpenClaw wrapper when deploying real autonomous generation.
 
