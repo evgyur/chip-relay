@@ -97,6 +97,8 @@ scripts/chip-relay task verify <run_id>
 scripts/chip-relay task pack <run_id> --name example-title
 scripts/chip-relay task list
 scripts/chip-relay task show <run_id>
+scripts/chip-relay task artifacts <run_id>
+scripts/chip-relay artifacts <run_id>
 
 scripts/chip-relay recipe list
 scripts/chip-relay recipe show example-title
@@ -133,6 +135,8 @@ rule:   do not dump cookies, auth headers, browser profiles, or raw tokens
 ```
 
 `task verify` is the completion gate. It compiles and runs `scripts/final.py`, captures `logs/verify.log`, requires final logs/results or screenshots, writes `verification/verify-result.json`, runs a hygiene scan into `verification/hygiene-report.json`, and updates `manifest.json` to `verified` or `failed`. It reports verification strength as `same-rail` by default.
+
+`task show` is the production adapter report: compact operator evidence only (run, rail, local CDP label, verification, artifact count, hygiene, blocker). `artifacts <run_id>` and `task artifacts <run_id>` return metadata-only artifact indexes with paths, sizes, and sensitivity. They do not print file contents and authenticated artifacts stay `private-local/no-auto-send` unless a separate policy-cleared export is added.
 
 `--template example-title` generates a Playwright/CDP smoke script that connects to `http://127.0.0.1:18800`, opens `example.com`, writes `results/result.json`, and saves `screenshots/999-final.png`. The default template stays placeholder-safe for CI and offline development.
 
