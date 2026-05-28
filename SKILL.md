@@ -78,6 +78,26 @@ scripts/chip-relay launch --backend browseros
 3. Launch and verify `http://127.0.0.1:${CHIP_RELAY_PORT:-18800}/json/version`.
 4. Use CDP clients only on loopback or through a trusted tunnel.
 5. Never commit runtime profiles, cookies, logs, `.env`, or downloaded binaries.
+6. For Webwright-style work, use the task layer and report evidence paths instead of pasting artifact contents.
+
+## Webwright task commands
+
+```bash
+scripts/chip-relay task init "example title smoke"
+scripts/chip-relay task run <run_id>
+scripts/chip-relay task loop <run_id> --agent-command "python3 /path/to/agent.py" --max-attempts 3
+scripts/chip-relay task verify <run_id>
+scripts/chip-relay task show <run_id>
+scripts/chip-relay artifacts <run_id>
+scripts/chip-relay task pack <run_id> --name example-title
+```
+
+Production adapter rules:
+
+- `task show` prints compact operator evidence: run, rail, local CDP label, verification, artifact count, hygiene, blocker.
+- `artifacts` returns metadata only: paths, types, sizes, sensitivity. It must not print log/screenshot/result contents.
+- Authenticated artifacts stay `private-local/no-auto-send` unless a separate policy-cleared export is built.
+- Agent integrations stay outside the public repo and connect through `--agent-command` plus `CHIP_RELAY_AGENT_CONTEXT`.
 
 ## Output Contract
 
@@ -97,6 +117,13 @@ Never print cookie values, auth headers, browser profile contents, or local `.en
 scripts/chip-relay doctor
 scripts/chip-relay --json status
 bash -n scripts/chip-relay scripts/chip-relay.sh scripts/install-cloakbrowser.sh scripts/chip-relay-watchdog.sh
+python3 -m py_compile chip_relay/*.py
+python3 tests/test_task_workspace.py
+python3 tests/test_task_verify.py
+python3 tests/test_task_run_pack.py
+python3 tests/test_recipe_commands.py
+python3 tests/test_agent_loop.py
+python3 tests/test_production_adapter.py
 python3 tests/test_public_hygiene.py
 python3 tests/test_shell_syntax.py
 ```

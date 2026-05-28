@@ -9,6 +9,7 @@ from .agent_loop import run_agent_loop
 from .config import load_config
 from .playwright_runner import doctor_webwright, run_final_script
 from .recipes import list_recipes, load_recipe, pack_run, parse_params, prepare_recipe_run
+from .reports import artifacts_report, evidence_report
 from .verifier import verify_run
 from .workspace import init_run, list_runs, load_manifest, resolve_run
 
@@ -42,6 +43,9 @@ def build_parser() -> argparse.ArgumentParser:
     show = task_sub.add_parser("show")
     show.add_argument("run")
 
+    task_artifacts = task_sub.add_parser("artifacts")
+    task_artifacts.add_argument("run")
+
     verify = task_sub.add_parser("verify")
     verify.add_argument("run")
     verify.add_argument("--strength", choices=["same-rail", "fresh-context", "clean-ci"], default="same-rail")
@@ -63,6 +67,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     doctor = sub.add_parser("doctor")
     doctor.add_argument("topic", nargs="?", default="webwright", choices=["webwright", "playwright"])
+
+    artifacts = sub.add_parser("artifacts")
+    artifacts.add_argument("run")
 
     recipe = sub.add_parser("recipe")
     recipe_sub = recipe.add_subparsers(dest="recipe_command", required=True)
@@ -101,10 +108,31 @@ def cmd_task(args: argparse.Namespace) -> int:
         if args.json_mode:
             print(json.dumps(manifest, ensure_ascii=False, indent=2))
         else:
-            print(f"run: {manifest.get('run_id')}")
-            print(f"status: {manifest.get('status')}")
-            print(f"title: {(manifest.get('task') or {}).get('title', '')}")
-            print(f"path: {run_dir}")
+            report = evidence_report(config, run_dir)
+            print(f"run: {report['run_id']}")
+            print(f"status: {report['status']}")
+            print(f"title: {report['title']}")
+            print(f"path: {report['run_dir']}")
+            print(f"rail: {report['rail']['id']}")
+            print(f"cdp: {report['rail']['cdp']}")
+            print(f"verification: {report['verification']['status']}")
+            print(f"strength: {report['verification']['strength']}")
+            print(f"artifacts: {report['artifacts']['count']}")
+            print(f"hygiene: {report['hygiene']}")
+            print(f"artifact_policy: {report['artifact_policy']}")
+            print(f"blocker: {report['blocker']}")
+        return 0
+    if args.task_command == "artifacts":
+        run_dir = resolve_run(config, args.run)
+        payload = artifacts_report(run_dir)
+        if args.json_mode:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            print(f"run: {payload['run_id']}")
+            print(f"artifact_policy: {payload['artifact_policy']}")
+            print(f"delivery: {payload['delivery']}")
+            for item in payload["artifacts"]:
+                print(f"- {item['path']} ({item['type']}, {item['size_bytes']} bytes, {item['sensitivity']})")
         return 0
     if args.task_command == "verify":
         run_dir = resolve_run(config, args.run)
@@ -184,6 +212,21 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     return 0 if payload["status"] == "ok" else 1
 
 
+def cmd_artifacts(args: argparse.Namespace) -> int:
+    config = load_config()
+    run_dir = resolve_run(config, args.run)
+    payload = artifacts_report(run_dir)
+    if args.json_mode:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print(f"run: {payload['run_id']}")
+        print(f"artifact_policy: {payload['artifact_policy']}")
+        print(f"delivery: {payload['delivery']}")
+        for item in payload["artifacts"]:
+            print(f"- {item['path']} ({item['type']}, {item['size_bytes']} bytes, {item['sensitivity']})")
+    return 0
+
+
 def cmd_recipe(args: argparse.Namespace) -> int:
     config = load_config()
     if args.recipe_command == "list":
@@ -233,6 +276,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_task(args)
     if args.command == "doctor":
         return cmd_doctor(args)
+    if args.command == "artifacts":
+        return cmd_artifacts(args)
     if args.command == "recipe":
         return cmd_recipe(args)
     raise SystemExit(f"unknown command: {args.command}")
