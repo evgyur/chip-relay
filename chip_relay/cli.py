@@ -9,6 +9,7 @@ from .agent_loop import run_agent_loop
 from .config import load_config
 from .playwright_runner import doctor_webwright, run_final_script
 from .recipes import list_recipes, load_recipe, pack_run, parse_params, prepare_recipe_run
+from .relay_adapter import format_evidence_lines, relay_response
 from .reports import artifacts_report, evidence_report
 from .verifier import verify_run
 from .workspace import init_run, list_runs, load_manifest, resolve_run
@@ -70,6 +71,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     artifacts = sub.add_parser("artifacts")
     artifacts.add_argument("run")
+
+    relay = sub.add_parser("relay")
+    relay.add_argument("tokens", nargs=argparse.REMAINDER)
 
     recipe = sub.add_parser("recipe")
     recipe_sub = recipe.add_subparsers(dest="recipe_command", required=True)
@@ -227,6 +231,27 @@ def cmd_artifacts(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_relay(args: argparse.Namespace) -> int:
+    config = load_config()
+    result = relay_response(config, args.tokens)
+    payload = result.payload
+    if args.json_mode:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    elif "evidence" in payload:
+        for line in format_evidence_lines(payload["evidence"]):
+            print(line)
+    elif payload.get("command") in {"artifacts", "task.artifacts"}:
+        artifacts = payload["artifacts"]
+        print(f"run: {artifacts['run_id']}")
+        print(f"artifact_policy: {artifacts['artifact_policy']}")
+        print(f"delivery: {artifacts['delivery']}")
+        for item in artifacts["artifacts"]:
+            print(f"- {item['path']} ({item['type']}, {item['size_bytes']} bytes, {item['sensitivity']})")
+    else:
+        emit(payload, json_mode=False)
+    return result.exit_code
+
+
 def cmd_recipe(args: argparse.Namespace) -> int:
     config = load_config()
     if args.recipe_command == "list":
@@ -278,6 +303,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_doctor(args)
     if args.command == "artifacts":
         return cmd_artifacts(args)
+    if args.command == "relay":
+        return cmd_relay(args)
     if args.command == "recipe":
         return cmd_recipe(args)
     raise SystemExit(f"unknown command: {args.command}")

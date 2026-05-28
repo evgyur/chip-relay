@@ -37,6 +37,7 @@ Usage:
   chip-relay launch [--backend auto|cloakbrowser|browseros|chromium] [--foreground]
   chip-relay open URL
   chip-relay task init|run|verify|pack|loop|list|show|artifacts ...
+  chip-relay relay [/relay] task init|verify|show|artifacts ...
   chip-relay artifacts RUN_ID
   chip-relay recipe list|show|run ...
   chip-relay doctor [webwright|playwright]
@@ -329,6 +330,8 @@ shift || true
 case "$cmd" in
   task)
     python3 -m chip_relay.cli $([ "$JSON" -eq 1 ] && printf '%s' --json) task "$@" ;;
+  relay)
+    python3 -m chip_relay.cli $([ "$JSON" -eq 1 ] && printf '%s' --json) relay "$@" ;;
   artifacts)
     python3 -m chip_relay.cli $([ "$JSON" -eq 1 ] && printf '%s' --json) artifacts "$@" ;;
   recipe)
