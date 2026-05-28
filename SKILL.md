@@ -86,6 +86,7 @@ scripts/chip-relay launch --backend browseros
 scripts/chip-relay task init "example title smoke"
 scripts/chip-relay task run <run_id>
 scripts/chip-relay task loop <run_id> --agent-command "python3 /path/to/agent.py" --max-attempts 3
+scripts/chip-relay task loop <run_id> --agent-command scripts/chip-relay-agent-example --max-attempts 1
 scripts/chip-relay task verify <run_id>
 scripts/chip-relay task show <run_id>
 scripts/chip-relay task artifacts <run_id>
@@ -101,6 +102,7 @@ Production adapter rules:
 - `artifacts` returns metadata only: paths, types, sizes, sensitivity. It must not print log/screenshot/result contents.
 - Authenticated artifacts stay `private-local/no-auto-send` unless a separate policy-cleared export is built.
 - Agent integrations stay outside the public repo and connect through `--agent-command` plus `CHIP_RELAY_AGENT_CONTEXT`.
+- `scripts/chip-relay-agent-example` is a deterministic public-safe external-agent example for loop smoke tests; it is not a provider integration.
 
 ## Output Contract
 
@@ -126,6 +128,7 @@ python3 tests/test_task_verify.py
 python3 tests/test_task_run_pack.py
 python3 tests/test_recipe_commands.py
 python3 tests/test_agent_loop.py
+python3 tests/test_bundled_agent_example.py
 python3 tests/test_production_adapter.py
 python3 tests/test_relay_adapter.py
 python3 tests/test_public_hygiene.py
