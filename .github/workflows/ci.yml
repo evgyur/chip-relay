@@ -26,6 +26,8 @@ jobs:
         run: python3 tests/test_agent_loop.py
       - name: Production adapter tests
         run: python3 tests/test_production_adapter.py
+      - name: Relay adapter tests
+        run: python3 tests/test_relay_adapter.py
       - name: Shell syntax
         run: python3 tests/test_shell_syntax.py
       - name: Skill guard
