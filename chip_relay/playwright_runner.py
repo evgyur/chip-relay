@@ -154,6 +154,6 @@ def doctor_webwright(config: RelayConfig) -> dict[str, Any]:
             "patterns_active": True,
         },
     }
-    # CDP can be down in CI/dev without making diagnostics fail. Hard failure belongs to live run/verify.
-    hard_ok = checks["python"]["ok"] and checks["playwright_import"]["ok"] and checks["workspace_writable"]["ok"] and checks["hygiene_scanner"]["ok"]
+    # CDP and Playwright can be absent in CI/offline diagnostics; doctor reports them but stays usable.
+    hard_ok = checks["python"]["ok"] and checks["workspace_writable"]["ok"] and checks["hygiene_scanner"]["ok"]
     return {"status": "ok" if hard_ok else "failed", "checks": checks}
