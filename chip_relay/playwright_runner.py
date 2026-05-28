@@ -79,16 +79,25 @@ def run_final_script(run_dir: Path, *, config: RelayConfig, timeout: int = 180) 
     env.setdefault("CHIP_RELAY_RUN_DIR", str(run_dir))
     env.setdefault("PYTHONUNBUFFERED", "1")
 
-    proc = subprocess.run(
-        [sys.executable, str(final_script)],
-        cwd=run_dir,
-        env=env,
-        text=True,
-        capture_output=True,
-        timeout=timeout,
-    )
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(final_script)],
+            cwd=run_dir,
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout if type(exc.stdout) is str else ""
+        stderr = exc.stderr if type(exc.stderr) is str else ""
+        combined = stdout + stderr
+        log_path.write_text(redact_text(combined), encoding="utf-8")
+        result = RunResult("failed", manifest.get("run_id", run_dir.name), run_dir, 124, log_path, config.cdp_url, "final_script_timeout", redact_text(combined))
+        _update_run_manifest(run_dir, manifest, result)
+        return result
     combined = (proc.stdout or "") + (proc.stderr or "")
-    log_path.write_text(combined, encoding="utf-8")
+    log_path.write_text(redact_text(combined), encoding="utf-8")
 
     status = "ran" if proc.returncode == 0 else "failed"
     failed_gate = None if proc.returncode == 0 else "final_script_exit"

@@ -133,16 +133,29 @@ def _task_loop_response(config: RelayConfig, tokens: list[str]) -> RelayAdapterR
     max_attempts = 3
     timeout = 120
     index = 1
+    known_flags = {"--agent-command", "--max-attempts", "--timeout"}
     while index < len(tokens):
         item = tokens[index]
         if item == "--agent-command" and index + 1 < len(tokens):
-            agent_command = tokens[index + 1]
-            index += 2
+            values: list[str] = []
+            index += 1
+            while index < len(tokens) and tokens[index] not in known_flags:
+                values.append(tokens[index])
+                index += 1
+            if not values:
+                return _fail("usage", "agent command is required", command="task.loop")
+            agent_command = values[0] if len(values) == 1 else " ".join(shlex.quote(value) for value in values)
         elif item == "--max-attempts" and index + 1 < len(tokens):
-            max_attempts = int(tokens[index + 1])
+            try:
+                max_attempts = int(tokens[index + 1])
+            except ValueError:
+                return _fail("usage", "--max-attempts must be an integer", command="task.loop")
             index += 2
         elif item == "--timeout" and index + 1 < len(tokens):
-            timeout = int(tokens[index + 1])
+            try:
+                timeout = int(tokens[index + 1])
+            except ValueError:
+                return _fail("usage", "--timeout must be an integer", command="task.loop")
             index += 2
         else:
             return _fail("usage", f"unknown task loop arg: {item}", command="task.loop")

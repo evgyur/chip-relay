@@ -103,6 +103,7 @@ Production adapter rules:
 - Authenticated artifacts stay `private-local/no-auto-send` unless a separate policy-cleared export is built.
 - Agent integrations stay outside the public repo and connect through `--agent-command` plus `CHIP_RELAY_AGENT_CONTEXT`.
 - `scripts/chip-relay-agent-example` is a deterministic public-safe external-agent example for loop smoke tests; it is not a provider integration.
+- Run IDs must not contain path components or escape `runs_dir`; verification must require fresh artifacts from the current attempt; browser cookie/profile dumps must fail hygiene.
 
 ## Output Contract
 
@@ -130,7 +131,8 @@ python3 tests/test_recipe_commands.py
 python3 tests/test_agent_loop.py
 python3 tests/test_bundled_agent_example.py
 python3 tests/test_production_adapter.py
-python3 tests/test_relay_adapter.py
+python3 tests/test_relay_adapter.py -v
+python3 tests/test_review_hardening.py -v
 python3 tests/test_public_hygiene.py
 python3 tests/test_shell_syntax.py
 ```

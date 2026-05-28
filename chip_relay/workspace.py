@@ -10,6 +10,7 @@ from typing import Any
 from .config import RelayConfig
 
 SCHEMA = "chip-relay-run-manifest-v1"
+RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
 @dataclass(frozen=True)
@@ -33,6 +34,14 @@ def make_run_id(title: str, now: datetime | None = None) -> str:
     current = now or utc_now()
     stamp = current.strftime("%Y-%m-%dT%H%M%SZ")
     return f"{stamp}-{slugify(title)}"
+
+
+def validate_run_id(run_id: str) -> str:
+    if not RUN_ID_PATTERN.fullmatch(run_id):
+        raise ValueError("invalid_run_id: use only letters, numbers, dot, underscore, and hyphen")
+    if ".." in run_id or "/" in run_id or "\\" in run_id:
+        raise ValueError("invalid_run_id: path components are not allowed")
+    return run_id
 
 
 def default_manifest(config: RelayConfig, run_id: str, title: str, run_dir: Path, *, template: str = "placeholder") -> dict[str, Any]:
@@ -153,7 +162,7 @@ if __name__ == "__main__":
 
 def init_run(config: RelayConfig, title: str, *, run_id: str | None = None, template: str = "placeholder") -> RunWorkspace:
     config.runs_dir.mkdir(parents=True, exist_ok=True)
-    rid = run_id or make_run_id(title)
+    rid = validate_run_id(run_id or make_run_id(title))
     run_dir = config.runs_dir / rid
     if run_dir.exists():
         raise FileExistsError(f"run already exists: {rid}")
@@ -182,9 +191,17 @@ def load_manifest(run_dir: Path) -> dict[str, Any]:
 
 def resolve_run(config: RelayConfig, run_id_or_path: str) -> Path:
     candidate = Path(run_id_or_path).expanduser()
+    runs_root = config.runs_dir.resolve()
     if candidate.exists():
-        return candidate.resolve()
-    return (config.runs_dir / run_id_or_path).resolve()
+        resolved = candidate.resolve()
+        if not resolved.is_relative_to(runs_root):
+            raise ValueError("invalid_run_id: resolved path escapes runs_dir")
+        return resolved
+    run_id = validate_run_id(run_id_or_path)
+    resolved = (config.runs_dir / run_id).resolve()
+    if not resolved.is_relative_to(runs_root):
+        raise ValueError("invalid_run_id: resolved path escapes runs_dir")
+    return resolved
 
 
 def list_runs(config: RelayConfig) -> list[dict[str, Any]]:

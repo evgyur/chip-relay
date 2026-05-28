@@ -51,12 +51,17 @@ def _agent_command_tokens(agent_command: str) -> list[str]:
     tokens = shlex.split(agent_command)
     if not tokens:
         return tokens
-    executable = Path(tokens[0]).expanduser()
-    if not executable.is_absolute() and ("/" in tokens[0] or tokens[0].startswith(".")):
-        candidate = (Path.cwd() / executable).resolve()
-        if candidate.exists():
-            tokens[0] = str(candidate)
-    return tokens
+    caller_cwd = Path.cwd()
+    resolved: list[str] = []
+    for token in tokens:
+        candidate = Path(token).expanduser()
+        if not candidate.is_absolute() and ("/" in token or token.startswith(".")):
+            from_caller = (caller_cwd / candidate).resolve()
+            if from_caller.exists():
+                resolved.append(str(from_caller))
+                continue
+        resolved.append(token)
+    return resolved
 
 
 def _update_manifest(run_dir: Path, result: AgentLoopResult) -> None:
@@ -120,14 +125,33 @@ def run_agent_loop(
         env["CHIP_RELAY_AGENT_CONTEXT"] = str(context_path)
         env["CHIP_RELAY_RUN_DIR"] = str(run_dir)
         env["CHIP_RELAY_CDP_URL"] = config.cdp_url
-        proc = subprocess.run(
-            _agent_command_tokens(agent_command),
-            cwd=run_dir,
-            env=env,
-            text=True,
-            capture_output=True,
-            timeout=timeout,
-        )
+        try:
+            proc = subprocess.run(
+                _agent_command_tokens(agent_command),
+                cwd=run_dir,
+                env=env,
+                text=True,
+                capture_output=True,
+                timeout=timeout,
+            )
+        except FileNotFoundError:
+            previous = {"status": "failed", "failed_gate": "agent_command_not_found", "exit_code": 127}
+            _write_json(agent_dir / f"feedback-{attempt:03d}.json", previous)
+            (agent_dir / f"attempt-{attempt:03d}.log").write_text("agent command not found\n", encoding="utf-8")
+            return _fail(run_dir, run_id, attempt, "agent_command_not_found", previous)
+        except PermissionError:
+            previous = {"status": "failed", "failed_gate": "agent_command_not_executable", "exit_code": 126}
+            _write_json(agent_dir / f"feedback-{attempt:03d}.json", previous)
+            (agent_dir / f"attempt-{attempt:03d}.log").write_text("agent command not executable\n", encoding="utf-8")
+            return _fail(run_dir, run_id, attempt, "agent_command_not_executable", previous)
+        except subprocess.TimeoutExpired as exc:
+            stdout = exc.stdout if type(exc.stdout) is str else ""
+            stderr = exc.stderr if type(exc.stderr) is str else ""
+            agent_log = stdout + stderr
+            (agent_dir / f"attempt-{attempt:03d}.log").write_text(redact_text(agent_log), encoding="utf-8")
+            previous = {"status": "failed", "failed_gate": "agent_command_timeout", "exit_code": None}
+            _write_json(agent_dir / f"feedback-{attempt:03d}.json", previous)
+            return _fail(run_dir, run_id, attempt, "agent_command_timeout", previous)
         agent_log = (proc.stdout or "") + (proc.stderr or "")
         (agent_dir / f"attempt-{attempt:03d}.log").write_text(redact_text(agent_log), encoding="utf-8")
         if proc.returncode != 0:

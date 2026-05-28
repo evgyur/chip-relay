@@ -4,6 +4,7 @@ import json
 import py_compile
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -82,6 +83,9 @@ def verify_run(run_dir: Path, *, strength: str = "same-rail") -> VerifyResult:
     verify_log = run_dir / "logs" / "verify.log"
     verify_log.parent.mkdir(parents=True, exist_ok=True)
 
+    if strength != "same-rail":
+        return fail(run_dir, manifest, "verification_strength_not_implemented", strength)
+
     if not final_script.is_file():
         return fail(run_dir, manifest, "final_script_missing", strength)
 
@@ -90,23 +94,37 @@ def verify_run(run_dir: Path, *, strength: str = "same-rail") -> VerifyResult:
     except py_compile.PyCompileError as exc:
         return fail(run_dir, manifest, "final_script_compile", strength, log_tail=redact_text(str(exc)))
 
-    proc = subprocess.run(
-        [sys.executable, str(final_script)],
-        cwd=run_dir,
-        text=True,
-        capture_output=True,
-        timeout=120,
-    )
+    verify_started_at = time.time()
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(final_script)],
+            cwd=run_dir,
+            text=True,
+            capture_output=True,
+            timeout=120,
+        )
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout if type(exc.stdout) is str else ""
+        stderr = exc.stderr if type(exc.stderr) is str else ""
+        combined = stdout + stderr
+        verify_log.write_text(redact_text(combined), encoding="utf-8")
+        return fail(run_dir, manifest, "final_script_timeout", strength, log_tail=redact_text(combined))
     combined = (proc.stdout or "") + (proc.stderr or "")
-    verify_log.write_text(combined, encoding="utf-8")
+    verify_log.write_text(redact_text(combined), encoding="utf-8")
     if proc.returncode != 0:
         return fail(run_dir, manifest, "final_script_exit", strength, proc.returncode, redact_text(combined))
 
     final_log = run_dir / "logs" / "final.log"
     result_json = run_dir / "results" / "result.json"
-    if not final_log.is_file() and not verify_log.read_text(encoding="utf-8").strip():
+
+    def fresh(path: Path) -> bool:
+        return path.is_file() and path.stat().st_mtime >= verify_started_at
+
+    has_fresh_log = fresh(final_log) or bool(verify_log.read_text(encoding="utf-8").strip())
+    has_fresh_result_or_screenshot = fresh(result_json) or any(path.stat().st_mtime >= verify_started_at for path in (run_dir / "screenshots").glob("*") if path.is_file())
+    if not has_fresh_log:
         return fail(run_dir, manifest, "final_log_missing", strength)
-    if not result_json.is_file() and not any((run_dir / "screenshots").glob("*")):
+    if not has_fresh_result_or_screenshot:
         return fail(run_dir, manifest, "required_artifact_missing", strength)
 
     hygiene_report = scan_path(run_dir)
