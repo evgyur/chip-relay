@@ -85,13 +85,14 @@ scripts/chip-relay kill
 `chip-relay` creates durable browser task workspaces and now has the first reproducible loop:
 
 ```text
-task workspace -> final.py -> run logs/artifacts -> verify gate -> packed recipe
+task workspace -> agent context -> final.py -> verify feedback loop -> packed recipe
 ```
 
 ```bash
 scripts/chip-relay task init "example title smoke"
 scripts/chip-relay task init "example title smoke" --template example-title
 scripts/chip-relay task run <run_id>
+scripts/chip-relay task loop <run_id> --agent-command "python3 /path/to/agent.py" --max-attempts 3
 scripts/chip-relay task verify <run_id>
 scripts/chip-relay task pack <run_id> --name example-title
 scripts/chip-relay task list
@@ -115,10 +116,21 @@ Default runtime paths:
 ├── screenshots/
 ├── traces/
 ├── results/
+├── agent/
 └── verification/
 ```
 
 `task run` executes `scripts/final.py` once, captures `logs/run.log`, injects `CHIP_RELAY_CDP_URL`, and marks the manifest `ran` or `failed`.
+
+`task loop` is the public-safe agent bridge. It writes `agent/request-NNN.json`, runs the external `--agent-command` with `CHIP_RELAY_AGENT_CONTEXT`, then calls `task verify`. If verification fails, the next request includes the redacted previous failure under `previous_result`. Loop artifacts stay inside `agent/`: request JSON, feedback JSON, redacted command logs, and `loop-result.json`.
+
+Agent command contract:
+
+```text
+input:  CHIP_RELAY_AGENT_CONTEXT=/path/to/agent/request-001.json
+output: write or update runs/<id>/scripts/final.py plus any private-local artifacts
+rule:   do not dump cookies, auth headers, browser profiles, or raw tokens
+```
 
 `task verify` is the completion gate. It compiles and runs `scripts/final.py`, captures `logs/verify.log`, requires final logs/results or screenshots, writes `verification/verify-result.json`, runs a hygiene scan into `verification/hygiene-report.json`, and updates `manifest.json` to `verified` or `failed`. It reports verification strength as `same-rail` by default.
 

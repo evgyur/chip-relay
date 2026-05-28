@@ -5,6 +5,7 @@ import json
 import sys
 from pathlib import Path
 
+from .agent_loop import run_agent_loop
 from .config import load_config
 from .playwright_runner import doctor_webwright, run_final_script
 from .recipes import list_recipes, load_recipe, pack_run, parse_params, prepare_recipe_run
@@ -53,6 +54,12 @@ def build_parser() -> argparse.ArgumentParser:
     pack.add_argument("run")
     pack.add_argument("--name", required=True)
     pack.add_argument("--force", action="store_true")
+
+    loop = task_sub.add_parser("loop")
+    loop.add_argument("run")
+    loop.add_argument("--agent-command", default=None)
+    loop.add_argument("--max-attempts", type=int, default=3)
+    loop.add_argument("--timeout", type=int, default=120)
 
     doctor = sub.add_parser("doctor")
     doctor.add_argument("topic", nargs="?", default="webwright", choices=["webwright", "playwright"])
@@ -148,6 +155,19 @@ def cmd_task(args: argparse.Namespace) -> int:
             if payload.get("failed_gate"):
                 print(f"failed_gate: {payload['failed_gate']}")
         return 0 if result.status == "packed" else 1
+    if args.task_command == "loop":
+        run_dir = resolve_run(config, args.run)
+        result = run_agent_loop(run_dir, config=config, agent_command=args.agent_command, max_attempts=args.max_attempts, timeout=args.timeout)
+        payload = result.as_dict()
+        if args.json_mode:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            print(f"run: {payload['run_id']}")
+            print(f"status: {payload['status']}")
+            print(f"attempts: {payload['attempts']}")
+            if payload.get("failed_gate"):
+                print(f"failed_gate: {payload['failed_gate']}")
+        return 0 if result.status == "verified" else 1
     raise SystemExit(f"unknown task command: {args.task_command}")
 
 
