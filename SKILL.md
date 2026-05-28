@@ -85,6 +85,8 @@ scripts/chip-relay launch --backend browseros
 ```bash
 scripts/chip-relay task init "example title smoke"
 scripts/chip-relay task run <run_id>
+scripts/chip-relay task context <run_id>
+scripts/chip-relay task context <run_id> --write
 scripts/chip-relay task loop <run_id> --agent-command "python3 /path/to/agent.py" --max-attempts 3
 scripts/chip-relay task loop <run_id> --agent-command scripts/chip-relay-agent-example --max-attempts 1
 scripts/chip-relay task verify <run_id>
@@ -101,7 +103,9 @@ Production adapter rules:
 - `relay [/relay] ...` maps Telegram/operator slash-command-shaped input to the safe task/recipe/artifact command surface and fails closed on unknown commands.
 - `artifacts` returns metadata only: paths, types, sizes, sensitivity. It must not print log/screenshot/result contents.
 - Authenticated artifacts stay `private-local/no-auto-send` unless a separate policy-cleared export is built.
-- Agent integrations stay outside the public repo and connect through `--agent-command` plus `CHIP_RELAY_AGENT_CONTEXT`.
+- `task context` is the Hermes-native workflow primitive: Hermes is the agent, `/relay` is the browser tool/substrate. It returns the editable `scripts/final.py`, verify/show/artifact commands, current verification state, evidence summary, and metadata-only artifact paths.
+- Use `task context --write` to persist `agent/hermes-context.json` for repeatable handoff without exposing artifact contents in chat.
+- Agent integrations that are not Hermes-in-process stay outside the public repo and connect through `--agent-command` plus `CHIP_RELAY_AGENT_CONTEXT`.
 - `scripts/chip-relay-agent-example` is a deterministic public-safe external-agent example for loop smoke tests; it is not a provider integration.
 - Run IDs must not contain path components or escape `runs_dir`; verification must require fresh artifacts from the current attempt; browser cookie/profile dumps must fail hygiene.
 
@@ -129,6 +133,7 @@ python3 tests/test_task_verify.py
 python3 tests/test_task_run_pack.py
 python3 tests/test_recipe_commands.py
 python3 tests/test_agent_loop.py
+python3 tests/test_hermes_workflow_context.py -v
 python3 tests/test_bundled_agent_example.py
 python3 tests/test_production_adapter.py
 python3 tests/test_relay_adapter.py -v

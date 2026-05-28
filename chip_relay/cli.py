@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .agent_loop import run_agent_loop
 from .config import load_config
+from .hermes_context import hermes_task_context
 from .playwright_runner import doctor_webwright, run_final_script
 from .recipes import list_recipes, load_recipe, pack_run, parse_params, prepare_recipe_run
 from .relay_adapter import format_evidence_lines, relay_response
@@ -46,6 +47,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     task_artifacts = task_sub.add_parser("artifacts")
     task_artifacts.add_argument("run")
+
+    context = task_sub.add_parser("context")
+    context.add_argument("run")
+    context.add_argument("--write", action="store_true")
 
     verify = task_sub.add_parser("verify")
     verify.add_argument("run")
@@ -137,6 +142,21 @@ def cmd_task(args: argparse.Namespace) -> int:
             print(f"delivery: {payload['delivery']}")
             for item in payload["artifacts"]:
                 print(f"- {item['path']} ({item['type']}, {item['size_bytes']} bytes, {item['sensitivity']})")
+        return 0
+    if args.task_command == "context":
+        run_dir = resolve_run(config, args.run)
+        payload = hermes_task_context(config, run_dir, write=args.write)
+        if args.json_mode:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            print(f"run: {payload['run_id']}")
+            print(f"status: {payload['status']}")
+            print(f"model: {payload['model']}")
+            print(f"next_action: {payload['next_action']}")
+            print("final_script: scripts/final.py")
+            print(f"artifact_policy: {payload['artifact_policy']}")
+            if payload.get("context_path"):
+                print(f"context_path: {payload['context_path']}")
         return 0
     if args.task_command == "verify":
         run_dir = resolve_run(config, args.run)

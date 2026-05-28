@@ -7,6 +7,7 @@ from typing import Any
 
 from .agent_loop import run_agent_loop
 from .config import RelayConfig
+from .hermes_context import hermes_task_context
 from .recipes import list_recipes, load_recipe, pack_run, parse_params, prepare_recipe_run
 from .reports import artifacts_report, evidence_report
 from .verifier import verify_run
@@ -73,7 +74,7 @@ def relay_text_response(config: RelayConfig, text: str) -> RelayAdapterResult:
 
 def _task_response(config: RelayConfig, tokens: list[str]) -> RelayAdapterResult:
     if not tokens:
-        return _fail("usage", "usage: /relay task <init|verify|show|artifacts|run|loop|pack>", command="task")
+        return _fail("usage", "usage: /relay task <init|context|verify|show|artifacts|run|loop|pack>", command="task")
     action = tokens[0]
     if action == "init":
         if len(tokens) < 2:
@@ -87,6 +88,17 @@ def _task_response(config: RelayConfig, tokens: list[str]) -> RelayAdapterResult
             "final_script": str(run.run_dir / "scripts" / "final.py"),
             "artifact_policy": "private-local/no-auto-send",
         })
+    if action == "context":
+        if len(tokens) not in {2, 3}:
+            return _fail("usage", "usage: /relay task context <run_id> [--write]", command="task.context")
+        write = False
+        if len(tokens) == 3:
+            if tokens[2] != "--write":
+                return _fail("usage", f"unknown task context arg: {tokens[2]}", command="task.context")
+            write = True
+        run_dir = resolve_run(config, tokens[1])
+        context = hermes_task_context(config, run_dir, write=write)
+        return _ok("task.context", {"status": "ok", "run_id": context["run_id"], "context": context})
     if action == "verify":
         if len(tokens) != 2:
             return _fail("usage", "usage: /relay task verify <run_id>", command="task.verify")
