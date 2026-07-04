@@ -7,6 +7,8 @@ from urllib.parse import urlparse
 
 from .config import RelayConfig
 from .workspace import load_manifest
+from .init_scripts import list_init_scripts
+from .network import load_observations
 
 ARTIFACT_POLICY = "private-local/no-auto-send"
 
@@ -29,7 +31,9 @@ def artifact_metadata(run_dir: Path) -> list[dict[str, Any]]:
     artifacts: list[dict[str, Any]] = []
     for rel_root, kind in (
         ("agent", "agent"),
+        ("init_scripts", "init_script"),
         ("logs", "log"),
+        ("network", "network"),
         ("results", "result"),
         ("screenshots", "screenshot"),
         ("traces", "trace"),
@@ -92,6 +96,11 @@ def evidence_report(config: RelayConfig, run_dir: Path) -> dict[str, Any]:
         "artifacts": {
             "count": len(artifacts),
             "paths": [item["path"] for item in artifacts],
+        },
+        "init_scripts": list_init_scripts(run_dir),
+        "network": {
+            "count": len(load_observations(run_dir)),
+            "artifact_policy": "metadata-only/redacted",
         },
         "artifact_policy": ARTIFACT_POLICY,
         "delivery": "metadata-only",

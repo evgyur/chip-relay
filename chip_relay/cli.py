@@ -6,14 +6,18 @@ import sys
 from pathlib import Path
 
 from .agent_loop import run_agent_loop
+from .cleanup import run_cleanup
 from .config import load_config
 from .hermes_context import hermes_task_context
+from .init_scripts import add_init_script, list_init_scripts
+from .network import export_network_metadata, record_observation, search_observations
 from .playwright_runner import doctor_webwright, run_final_script
 from .recipes import list_recipes, load_recipe, pack_run, parse_params, prepare_recipe_run
 from .relay_adapter import format_evidence_lines, relay_response
 from .reports import artifacts_report, evidence_report
+from .stealth import load_sample, stealth_doctor
 from .verifier import verify_run
-from .workspace import init_run, list_runs, load_manifest, resolve_run
+from .workspace import init_run, list_runs, load_manifest, resolve_run, write_manifest
 
 
 def emit(payload: object, *, json_mode: bool) -> None:
@@ -71,8 +75,39 @@ def build_parser() -> argparse.ArgumentParser:
     loop.add_argument("--max-attempts", type=int, default=3)
     loop.add_argument("--timeout", type=int, default=120)
 
+    network = task_sub.add_parser("network")
+    network.add_argument("run")
+    network_sub = network.add_subparsers(dest="network_command", required=True)
+    network_add = network_sub.add_parser("add")
+    network_add.add_argument("--json-file", required=True)
+    network_search = network_sub.add_parser("search")
+    network_search.add_argument("--url", dest="url_contains")
+    network_search.add_argument("--method")
+    network_search.add_argument("--status", type=int)
+    network_search.add_argument("--resource-type")
+    network_search.add_argument("--limit", type=int, default=50)
+    network_search.add_argument("--offset", type=int, default=0)
+    network_sub.add_parser("export")
+
+    init_script = task_sub.add_parser("init-script")
+    init_script.add_argument("run")
+    init_script_sub = init_script.add_subparsers(dest="init_script_command", required=True)
+    init_add = init_script_sub.add_parser("add")
+    init_add.add_argument("name")
+    init_add.add_argument("--file", required=True)
+    init_script_sub.add_parser("list")
+
     doctor = sub.add_parser("doctor")
     doctor.add_argument("topic", nargs="?", default="webwright", choices=["webwright", "playwright"])
+
+    cleanup = sub.add_parser("cleanup")
+    cleanup.add_argument("--execute", action="store_true")
+
+    stealth = sub.add_parser("stealth")
+    stealth_sub = stealth.add_subparsers(dest="stealth_command", required=True)
+    stealth_doctor_parser = stealth_sub.add_parser("doctor")
+    stealth_doctor_parser.add_argument("--preset", choices=["normal", "strict", "cf-sensitive"], default="normal")
+    stealth_doctor_parser.add_argument("--sample-json")
 
     artifacts = sub.add_parser("artifacts")
     artifacts.add_argument("run")
@@ -90,6 +125,48 @@ def build_parser() -> argparse.ArgumentParser:
     recipe_run.add_argument("--param", action="append", default=[])
     recipe_run.add_argument("--verify", action="store_true")
     return parser
+
+
+def cmd_task_network(args: argparse.Namespace, config) -> int:
+    run_dir = resolve_run(config, args.run)
+    if args.network_command == "add":
+        raw = json.loads(Path(args.json_file).read_text(encoding="utf-8"))
+        payload = record_observation(run_dir, raw)
+        emit({"status": "recorded", "run_id": run_dir.name, "observation": payload}, json_mode=args.json_mode)
+        return 0
+    if args.network_command == "search":
+        payload = search_observations(
+            run_dir,
+            url_contains=args.url_contains,
+            method=args.method,
+            status=args.status,
+            resource_type=args.resource_type,
+            limit=args.limit,
+            offset=args.offset,
+        )
+        emit(payload, json_mode=args.json_mode)
+        return 0
+    if args.network_command == "export":
+        payload = export_network_metadata(run_dir)
+        emit(payload, json_mode=args.json_mode)
+        return 0
+    raise SystemExit(f"unknown network command: {args.network_command}")
+
+
+def cmd_task_init_script(args: argparse.Namespace, config) -> int:
+    run_dir = resolve_run(config, args.run)
+    if args.init_script_command == "add":
+        source = Path(args.file).read_text(encoding="utf-8")
+        item = add_init_script(run_dir, args.name, source)
+        manifest = load_manifest(run_dir)
+        manifest["init_scripts"] = list_init_scripts(run_dir)
+        write_manifest(run_dir, manifest)
+        emit({"status": "added", "run_id": manifest.get("run_id", run_dir.name), "script": item}, json_mode=args.json_mode)
+        return 0
+    if args.init_script_command == "list":
+        emit({"status": "ok", "run_id": run_dir.name, "scripts": list_init_scripts(run_dir)}, json_mode=args.json_mode)
+        return 0
+    raise SystemExit(f"unknown init-script command: {args.init_script_command}")
 
 
 def cmd_task(args: argparse.Namespace) -> int:
@@ -220,6 +297,10 @@ def cmd_task(args: argparse.Namespace) -> int:
             if payload.get("failed_gate"):
                 print(f"failed_gate: {payload['failed_gate']}")
         return 0 if result.status == "verified" else 1
+    if args.task_command == "network":
+        return cmd_task_network(args, config)
+    if args.task_command == "init-script":
+        return cmd_task_init_script(args, config)
     raise SystemExit(f"unknown task command: {args.task_command}")
 
 
@@ -234,6 +315,21 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             marker = "ok" if check.get("ok") else "fail"
             print(f"- {name}: {marker}")
     return 0 if payload["status"] == "ok" else 1
+
+
+def cmd_cleanup(args: argparse.Namespace) -> int:
+    config = load_config()
+    payload = run_cleanup(config, execute=args.execute)
+    emit(payload, json_mode=args.json_mode)
+    return 0 if payload["status"] == "ok" else 1
+
+
+def cmd_stealth(args: argparse.Namespace) -> int:
+    if args.stealth_command == "doctor":
+        payload = stealth_doctor(preset=args.preset, sample=load_sample(args.sample_json))
+        emit(payload, json_mode=args.json_mode)
+        return 0
+    raise SystemExit(f"unknown stealth command: {args.stealth_command}")
 
 
 def cmd_artifacts(args: argparse.Namespace) -> int:
@@ -322,6 +418,10 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_task(args)
         if args.command == "doctor":
             return cmd_doctor(args)
+        if args.command == "cleanup":
+            return cmd_cleanup(args)
+        if args.command == "stealth":
+            return cmd_stealth(args)
         if args.command == "artifacts":
             return cmd_artifacts(args)
         if args.command == "relay":

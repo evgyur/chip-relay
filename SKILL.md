@@ -92,6 +92,14 @@ scripts/chip-relay task loop <run_id> --agent-command scripts/chip-relay-agent-e
 scripts/chip-relay task verify <run_id>
 scripts/chip-relay task show <run_id>
 scripts/chip-relay task artifacts <run_id>
+scripts/chip-relay task network <run_id> add --json-file request.json
+scripts/chip-relay task network <run_id> search --url api --method GET
+scripts/chip-relay task network <run_id> export
+scripts/chip-relay task init-script <run_id> add webdriver --file init/webdriver.js
+scripts/chip-relay task init-script <run_id> list
+scripts/chip-relay cleanup
+scripts/chip-relay cleanup --execute
+scripts/chip-relay stealth doctor --preset cf-sensitive
 scripts/chip-relay artifacts <run_id>
 scripts/chip-relay relay /relay task init "example title smoke"
 scripts/chip-relay task pack <run_id> --name example-title
@@ -102,8 +110,15 @@ Production adapter rules:
 - `task show` prints compact operator evidence: run, rail, local CDP label, verification, artifact count, hygiene, blocker.
 - `relay [/relay] ...` maps Telegram/operator slash-command-shaped input to the safe task/recipe/artifact command surface and fails closed on unknown commands.
 - `artifacts` returns metadata only: paths, types, sizes, sensitivity. It must not print log/screenshot/result contents.
+- `task network` stores redacted request metadata under `network/`; sensitive headers/query tokens and bodies are not printed by default.
+- `task init-script` stores pre-document JavaScript under `init_scripts/` and reports only name/size/SHA-256; `example-title` loads it before navigation.
+- `doctor webwright` includes browser environment, exact CDP binding, and redacted `CHIP_RELAY_PROXY` diagnostics.
+- `cleanup` is dry-run by default and may only remove relay-managed paths inside `CHIP_RELAY_BASE_DIR`.
+- Upload helpers require `CHIP_RELAY_UPLOAD_ALLOWED_DIRS` and reject relative/outside/symlink paths.
+- `stealth doctor` is diagnostic-only: presets report fingerprint/challenge state, not guaranteed Cloudflare bypass.
 - Authenticated artifacts stay `private-local/no-auto-send` unless a separate policy-cleared export is built.
 - `task context` is the Hermes-native workflow primitive: Hermes is the agent, `/relay` is the browser tool/substrate. It returns the editable `scripts/final.py`, verify/show/artifact commands, current verification state, evidence summary, and metadata-only artifact paths.
+- new task workspaces include `task.brief_schema=chip-relay-agent-brief-v2` in `manifest.json` and matching sections in `task.md`: `agent_instructions`, `success_metrics`, `known_frictions`, and `verification_questions`.
 - Use `task context --write` to persist `agent/hermes-context.json` for repeatable handoff without exposing artifact contents in chat.
 - Agent integrations that are not Hermes-in-process stay outside the public repo and connect through `--agent-command` plus `CHIP_RELAY_AGENT_CONTEXT`.
 - `scripts/chip-relay-agent-example` is a deterministic public-safe external-agent example for loop smoke tests; it is not a provider integration.
@@ -138,6 +153,7 @@ python3 tests/test_bundled_agent_example.py
 python3 tests/test_production_adapter.py
 python3 tests/test_relay_adapter.py -v
 python3 tests/test_review_hardening.py -v
+python3 tests/test_stealth_browser_mcp_adoption.py -v
 python3 tests/test_public_hygiene.py
 python3 tests/test_shell_syntax.py
 ```

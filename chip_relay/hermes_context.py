@@ -30,6 +30,7 @@ def _next_action(status: str, verification: dict[str, Any]) -> str:
 def hermes_task_context(config: RelayConfig, run_dir: Path, *, write: bool = False) -> dict[str, Any]:
     manifest = load_manifest(run_dir)
     run_id = str(manifest.get("run_id", run_dir.name))
+    task = manifest.get("task", {})
     verification = _last_verification(manifest)
     evidence = evidence_report(config, run_dir)
     artifact_index = artifacts_report(run_dir)
@@ -38,7 +39,8 @@ def hermes_task_context(config: RelayConfig, run_dir: Path, *, write: bool = Fal
         "model": "hermes-agent-uses-relay-tool",
         "run_id": run_id,
         "run_dir": str(run_dir),
-        "task": manifest.get("task", {}),
+        "task": task,
+        "task_brief": task.get("brief", {}),
         "status": manifest.get("status", "unknown"),
         "next_action": _next_action(str(manifest.get("status", "unknown")), verification),
         "editable_files": ["scripts/final.py"],

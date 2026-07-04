@@ -22,6 +22,7 @@ XAUTHORITY_VALUE="${CHIP_RELAY_XAUTHORITY:-${XAUTHORITY:-$HOME/.Xauthority}}"
 LAUNCH_TIMEOUT="${CHIP_RELAY_LAUNCH_TIMEOUT:-60}"
 HEADLESS="${CHIP_RELAY_HEADLESS:-0}"
 DEFAULT_BACKEND="${CHIP_RELAY_BACKEND:-auto}"
+PROXY="${CHIP_RELAY_PROXY:-}"
 FOREGROUND=0
 JSON=0
 BACKEND="$DEFAULT_BACKEND"
@@ -40,6 +41,8 @@ Usage:
   chip-relay relay [/relay] task init|context|verify|show|artifacts ...
   chip-relay artifacts RUN_ID
   chip-relay recipe list|show|run ...
+  chip-relay cleanup [--execute]
+  chip-relay stealth doctor [--preset normal|strict|cf-sensitive] [--sample-json file]
   chip-relay doctor [webwright|playwright]
   chip-relay status|doctor|tabs|health|kill
 
@@ -48,6 +51,7 @@ Environment:
   CHIP_RELAY_HOST=$HOST
   CHIP_RELAY_PORT=$PORT
   CHIP_RELAY_PROFILE_DIR=$PROFILE_DIR
+  CHIP_RELAY_PROXY=${PROXY:+configured-redacted}
 EOF
 }
 
@@ -152,6 +156,28 @@ backend_bin() {
   esac
 }
 
+proxy_server() {
+  [ -z "$PROXY" ] && return 1
+  PYTHONPATH="$REPO_DIR" python3 - <<'PY'
+import os, sys
+from chip_relay.proxy import ProxyConfigError, parse_proxy_config
+try:
+    print(parse_proxy_config(os.environ.get('CHIP_RELAY_PROXY', '')).server)
+except ProxyConfigError as exc:
+    print(f"proxy config invalid: {exc}", file=sys.stderr)
+    sys.exit(2)
+PY
+}
+
+proxy_redacted() {
+  [ -z "$PROXY" ] && { echo "not-configured"; return 0; }
+  PYTHONPATH="$REPO_DIR" python3 - <<'PY'
+import os
+from chip_relay.proxy import redact_proxy_url
+print(redact_proxy_url(os.environ.get('CHIP_RELAY_PROXY', '')) or 'configured')
+PY
+}
+
 current_owner() {
   python3 - "$PORT" <<'PY'
 import glob, sys
@@ -198,6 +224,11 @@ launch_backend() {
   args+=(--remote-debugging-port="$PORT")
   args+=(--user-data-dir="$PROFILE_DIR")
   args+=(--no-first-run --no-default-browser-check --disable-dev-shm-usage)
+  if [ -n "$PROXY" ]; then
+    local proxy_value
+    proxy_value="$(proxy_server)" || return 1
+    args+=(--proxy-server="$proxy_value")
+  fi
   if [ "$HEADLESS" = "1" ]; then
     args+=(--headless=new)
   else
@@ -278,6 +309,7 @@ cmd_doctor() {
   echo "- python3: $(command -v python3 || echo missing)"
   echo "- Xvfb: $(command -v Xvfb || echo optional-missing)"
   echo "- display: $DISPLAY_VALUE"
+  echo "- proxy: $(proxy_redacted)"
   echo "- cdp: $(check_cdp && echo up || echo down)"
 }
 
@@ -336,6 +368,10 @@ case "$cmd" in
     python3 -m chip_relay.cli $([ "$JSON" -eq 1 ] && printf '%s' --json) artifacts "$@" ;;
   recipe)
     python3 -m chip_relay.cli $([ "$JSON" -eq 1 ] && printf '%s' --json) recipe "$@" ;;
+  cleanup)
+    python3 -m chip_relay.cli $([ "$JSON" -eq 1 ] && printf '%s' --json) cleanup "$@" ;;
+  stealth)
+    python3 -m chip_relay.cli $([ "$JSON" -eq 1 ] && printf '%s' --json) stealth "$@" ;;
   launch|start)
     while [ $# -gt 0 ]; do
       case "$1" in

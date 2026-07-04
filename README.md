@@ -88,6 +88,10 @@ scripts/chip-relay kill
 task workspace -> Hermes context -> final.py -> verify feedback loop -> packed recipe
 ```
 
+New task workspaces include an AI-readable brief in both `task.md` and `manifest.json` under
+`task.brief_schema=chip-relay-agent-brief-v2`. The brief gives agents explicit `agent_instructions`,
+`success_metrics`, `known_frictions`, and `verification_questions` before they edit `scripts/final.py`.
+
 ```bash
 scripts/chip-relay task init "example title smoke"
 scripts/chip-relay task init "example title smoke" --template example-title
@@ -101,6 +105,14 @@ scripts/chip-relay task pack <run_id> --name example-title
 scripts/chip-relay task list
 scripts/chip-relay task show <run_id>
 scripts/chip-relay task artifacts <run_id>
+scripts/chip-relay task network <run_id> add --json-file request.json
+scripts/chip-relay task network <run_id> search --url api --method GET
+scripts/chip-relay task network <run_id> export
+scripts/chip-relay task init-script <run_id> add webdriver --file init/webdriver.js
+scripts/chip-relay task init-script <run_id> list
+scripts/chip-relay cleanup
+scripts/chip-relay cleanup --execute
+scripts/chip-relay stealth doctor --preset cf-sensitive
 scripts/chip-relay artifacts <run_id>
 scripts/chip-relay relay /relay task init "example title smoke"
 
@@ -128,7 +140,7 @@ Default runtime paths:
 
 `task run` executes `scripts/final.py` once, captures `logs/run.log`, injects `CHIP_RELAY_CDP_URL`, and marks the manifest `ran` or `failed`.
 
-`task context` is the Hermes-native workflow primitive. It returns `chip-relay-hermes-workflow-context-v1`: task, rail, editable files, verify/show/artifacts commands, current verification state, evidence summary, and metadata-only artifact paths. This is the preferred integration when Hermes itself is the agent: Hermes edits `scripts/final.py`, runs `task verify`, reads structured feedback/evidence, and never sends artifact contents to chat by default. `--write` stores the same context at `agent/hermes-context.json` for repeatable handoff.
+`task context` is the Hermes-native workflow primitive. It returns `chip-relay-hermes-workflow-context-v1`: task, `task_brief`, rail, editable files, verify/show/artifacts commands, current verification state, evidence summary, and metadata-only artifact paths. This is the preferred integration when Hermes itself is the agent: Hermes reads the brief, edits `scripts/final.py`, runs `task verify`, reads structured feedback/evidence, and never sends artifact contents to chat by default. `--write` stores the same context at `agent/hermes-context.json` for repeatable handoff.
 
 `task loop` is the public-safe external-agent bridge. It writes `agent/request-NNN.json`, runs the external `--agent-command` with `CHIP_RELAY_AGENT_CONTEXT`, then calls `task verify`. If verification fails, the next request includes the redacted previous failure under `previous_result`. Loop artifacts stay inside `agent/`: request JSON, feedback JSON, redacted command logs, and `loop-result.json`.
 
@@ -143,6 +155,14 @@ rule:   do not dump cookies, auth headers, browser profiles, or raw tokens
 ```
 
 `task verify` is the completion gate. It compiles and runs `scripts/final.py`, captures a redacted `logs/verify.log`, requires fresh final logs/results or screenshots from the current verify attempt, writes `verification/verify-result.json`, runs a hygiene scan into `verification/hygiene-report.json`, and updates `manifest.json` to `verified` or `failed`. It currently implements `same-rail`; unimplemented strengths fail closed instead of pretending isolation.
+
+Network observations are stored under `network/` inside the run. `task network add/search/export` is metadata-first: URLs have token-like query values redacted, sensitive headers such as `Authorization`, `Cookie`, and `Set-Cookie` are replaced with `[REDACTED]`, and request/response bodies are represented only as presence/byte metadata. The exported JSON is a private-local artifact and is never printed as raw captured content by default.
+
+Init scripts live under `init_scripts/` inside the run. `task init-script add/list` reports only name, size, and SHA-256. The `example-title` Playwright/CDP template loads these scripts with `context.add_init_script(...)` before navigation, which is the right place for webdriver/language/timezone/WebGL consistency patches.
+
+`doctor webwright` also reports browser executable/root/container/sandbox hints, exact local-vs-nonlocal CDP binding, and a redacted proxy diagnostic from `CHIP_RELAY_PROXY`. `cleanup` is dry-run by default and only operates inside `CHIP_RELAY_BASE_DIR`; `--execute` refuses outside-base and symlink targets. Upload helpers use `CHIP_RELAY_UPLOAD_ALLOWED_DIRS` and reject relative, missing, directory, symlink, or outside-root files.
+
+`stealth doctor` is diagnostic-only. Presets `normal`, `strict`, and `cf-sensitive` check fingerprint consistency and classify public challenge samples as `passed`, `captcha/manual`, `blocked`, `needs_proxy`, or `not_run`; the repo intentionally does not claim guaranteed Cloudflare bypass rates.
 
 Hardening rules: run IDs cannot contain path components or escape `runs_dir`; browser cookie/profile dumps (`Cookies`, `Local State`, SQLite DBs, HARs, symlinks) fail hygiene; agent command failures return structured gates such as `agent_command_not_found` or `agent_command_timeout`.
 

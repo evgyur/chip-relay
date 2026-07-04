@@ -17,7 +17,7 @@ DENY_PATTERNS = [
 ALLOW_IPS = {'127.0.0.1', '0.0.0.0'}
 errors = []
 for path in ROOT.rglob('*'):
-    if path.is_dir() or '.git' in path.parts:
+    if path.is_dir() or '.git' in path.parts or '.supergoal' in path.parts:
         continue
     if path.suffix not in TEXT_SUFFIXES and path.name != 'LICENSE':
         continue

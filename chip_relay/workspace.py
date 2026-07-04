@@ -46,6 +46,7 @@ def validate_run_id(run_id: str) -> str:
 
 def default_manifest(config: RelayConfig, run_id: str, title: str, run_dir: Path, *, template: str = "placeholder") -> dict[str, Any]:
     now = utc_now().isoformat().replace("+00:00", "Z")
+    brief = default_task_brief(title, template=template)
     return {
         "schema": SCHEMA,
         "run_id": run_id,
@@ -55,6 +56,8 @@ def default_manifest(config: RelayConfig, run_id: str, title: str, run_dir: Path
             "title": title,
             "source": "cli",
             "sensitivity": "private-local",
+            "brief_schema": "chip-relay-agent-brief-v2",
+            "brief": brief,
         },
         "rail": {
             "rail_id": config.profile,
@@ -75,7 +78,60 @@ def default_manifest(config: RelayConfig, run_id: str, title: str, run_dir: Path
             "strength": "not-run",
             "last_result": None,
         },
+        "init_scripts": [],
     }
+
+
+def default_task_brief(title: str, *, template: str = "placeholder") -> dict[str, Any]:
+    return {
+        "agent_instructions": [
+            "Treat task.md and manifest.json as the source-of-truth brief before editing scripts/final.py.",
+            "Make the smallest script change that satisfies the task and can be freshly verified.",
+            "Keep secrets, cookies, browser profiles, HAR files, and raw private artifact contents out of chat output.",
+        ],
+        "success_metrics": [
+            "scripts/final.py exits 0 under task verify.",
+            "Verification produces fresh evidence from the current attempt.",
+            "At least one useful result artifact exists under results/ or screenshots/.",
+            "Hygiene scan passes with no forbidden browser/auth artifacts.",
+        ],
+        "known_frictions": [
+            "CDP endpoint unavailable or bound to the wrong rail.",
+            "Authentication, captcha, or rate-limit wall blocks the live site.",
+            "DOM, selector, or navigation timing changed since the script was written.",
+            "Artifacts may contain private data and must stay metadata-only by default.",
+        ],
+        "verification_questions": [
+            "Did task verify run after the latest scripts/final.py edit?",
+            "Do logs/results/screenshots come from the current verify attempt rather than stale files?",
+            "Does the evidence prove the requested outcome, not just script execution?",
+            "Did hygiene block forbidden profile, cookie, token, HAR, SQLite, or symlink artifacts?",
+        ],
+        "context": {
+            "title": title,
+            "template": template,
+        },
+    }
+
+
+def task_markdown(title: str, *, template: str = "placeholder") -> str:
+    brief = default_task_brief(title, template=template)
+
+    def section(name: str, values: list[str]) -> str:
+        lines = [f"## {name}", ""]
+        lines.extend(f"- {value}" for value in values)
+        return "\n".join(lines)
+
+    return "\n\n".join([
+        "# Task",
+        title,
+        "## Brief Schema\n\nchip-relay-agent-brief-v2",
+        section("Agent Instructions", brief["agent_instructions"]),
+        section("Success Metrics", brief["success_metrics"]),
+        section("Known Frictions", brief["known_frictions"]),
+        section("Verification Questions", brief["verification_questions"]),
+        "",
+    ])
 
 
 def final_template(title: str, *, template: str = "placeholder") -> str:
@@ -95,6 +151,7 @@ RUN_DIR = pathlib.Path(__file__).resolve().parents[1]
 LOG_DIR = RUN_DIR / "logs"
 RESULT_DIR = RUN_DIR / "results"
 SCREENSHOT_DIR = RUN_DIR / "screenshots"
+INIT_SCRIPT_DIR = RUN_DIR / "init_scripts"
 CDP_URL = os.environ.get("CHIP_RELAY_CDP_URL", "http://127.0.0.1:18800")
 
 for directory in (LOG_DIR, RESULT_DIR, SCREENSHOT_DIR):
@@ -108,11 +165,21 @@ def log(message: str) -> None:
         handle.write(line + "\\n")
 
 
+def apply_init_scripts(context) -> None:
+    if not INIT_SCRIPT_DIR.exists():
+        return
+    for script_path in sorted(INIT_SCRIPT_DIR.glob("*.js")):
+        if script_path.is_file() and not script_path.is_symlink():
+            context.add_init_script(path=str(script_path))
+            log(f"loaded init script {{script_path.name}}")
+
+
 def main() -> int:
     log(f"connecting to {{CDP_URL}}")
     with sync_playwright() as p:
         browser = p.chromium.connect_over_cdp(CDP_URL)
         context = browser.contexts[0] if browser.contexts else browser.new_context()
+        apply_init_scripts(context)
         page = context.new_page()
         page.goto("https://example.com", wait_until="domcontentloaded", timeout=30000)
         page.screenshot(path=str(SCREENSHOT_DIR / "999-final.png"), full_page=True)
@@ -136,6 +203,7 @@ RUN_DIR = pathlib.Path(__file__).resolve().parents[1]
 LOG_DIR = RUN_DIR / "logs"
 RESULT_DIR = RUN_DIR / "results"
 SCREENSHOT_DIR = RUN_DIR / "screenshots"
+INIT_SCRIPT_DIR = RUN_DIR / "init_scripts"
 
 for directory in (LOG_DIR, RESULT_DIR, SCREENSHOT_DIR):
     directory.mkdir(parents=True, exist_ok=True)
@@ -146,6 +214,15 @@ def log(message: str) -> None:
     print(line, flush=True)
     with open(LOG_DIR / "final.log", "a", encoding="utf-8") as handle:
         handle.write(line + "\\n")
+
+
+def apply_init_scripts(context) -> None:
+    if not INIT_SCRIPT_DIR.exists():
+        return
+    for script_path in sorted(INIT_SCRIPT_DIR.glob("*.js")):
+        if script_path.is_file() and not script_path.is_symlink():
+            context.add_init_script(path=str(script_path))
+            log(f"loaded init script {{script_path.name}}")
 
 
 def main() -> int:
@@ -166,9 +243,9 @@ def init_run(config: RelayConfig, title: str, *, run_id: str | None = None, temp
     run_dir = config.runs_dir / rid
     if run_dir.exists():
         raise FileExistsError(f"run already exists: {rid}")
-    for rel in ("scripts", "logs", "screenshots", "traces", "results/downloads", "verification"):
+    for rel in ("scripts", "logs", "screenshots", "traces", "results/downloads", "verification", "init_scripts", "network"):
         (run_dir / rel).mkdir(parents=True, exist_ok=True)
-    (run_dir / "task.md").write_text(f"# Task\n\n{title}\n", encoding="utf-8")
+    (run_dir / "task.md").write_text(task_markdown(title, template=template), encoding="utf-8")
     (run_dir / "README.md").write_text(f"# {rid}\n\nStatus: initialized\n", encoding="utf-8")
     final_path = run_dir / "scripts" / "final.py"
     final_path.write_text(final_template(title, template=template), encoding="utf-8")

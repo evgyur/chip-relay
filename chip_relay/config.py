@@ -15,6 +15,8 @@ class RelayConfig:
     cdp_url: str
     profile: str
     profile_dir: Path
+    proxy: str | None
+    upload_allowed_dirs: str | None
 
 
 def _expand(path: str) -> Path:
@@ -30,6 +32,8 @@ def load_config() -> RelayConfig:
     cdp_url = os.environ.get("CHIP_RELAY_CDP_URL", f"http://{host}:{port}")
     profile = os.environ.get("CHIP_RELAY_PROFILE", "default")
     profile_dir = _expand(os.environ.get("CHIP_RELAY_PROFILE_DIR", str(base_dir / "profiles" / profile)))
+    proxy = os.environ.get("CHIP_RELAY_PROXY")
+    upload_allowed_dirs = os.environ.get("CHIP_RELAY_UPLOAD_ALLOWED_DIRS")
     return RelayConfig(
         base_dir=base_dir,
         runs_dir=runs_dir,
@@ -39,4 +43,6 @@ def load_config() -> RelayConfig:
         cdp_url=cdp_url,
         profile=profile,
         profile_dir=profile_dir,
+        proxy=proxy,
+        upload_allowed_dirs=upload_allowed_dirs,
     )

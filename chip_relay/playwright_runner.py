@@ -13,7 +13,9 @@ from pathlib import Path
 from typing import Any
 
 from .config import RelayConfig
+from .environment import browser_environment
 from .hygiene import redact_text, scan_path
+from .proxy import ProxyConfigError, parse_proxy_config, redact_proxy_url
 from .workspace import load_manifest, write_manifest
 
 
@@ -139,6 +141,20 @@ def doctor_webwright(config: RelayConfig) -> dict[str, Any]:
     playwright_spec = importlib.util.find_spec("playwright")
     cdp = cdp_version(config.cdp_url)
     hygiene = scan_path(Path(__file__).resolve().parent)
+    env_report = browser_environment(config.cdp_url)
+    proxy_check: dict[str, Any] = {"ok": True, "configured": False, "server": None}
+    if config.proxy:
+        try:
+            parsed_proxy = parse_proxy_config(config.proxy)
+            proxy_check = {
+                "ok": True,
+                "configured": True,
+                "server": parsed_proxy.server,
+                "redacted": redact_proxy_url(config.proxy),
+                "auth": parsed_proxy.username is not None,
+            }
+        except ProxyConfigError as exc:
+            proxy_check = {"ok": False, "configured": True, "failed_gate": str(exc), "redacted": "[REDACTED]"}
 
     checks = {
         "python": {
@@ -154,6 +170,8 @@ def doctor_webwright(config: RelayConfig) -> dict[str, Any]:
             "url": config.cdp_url,
             "version": cdp,
         },
+        "browser_environment": env_report,
+        "proxy": proxy_check,
         "workspace_writable": {
             "ok": writable,
             "runs_dir": str(config.runs_dir),
@@ -164,5 +182,5 @@ def doctor_webwright(config: RelayConfig) -> dict[str, Any]:
         },
     }
     # CDP and Playwright can be absent in CI/offline diagnostics; doctor reports them but stays usable.
-    hard_ok = checks["python"]["ok"] and checks["workspace_writable"]["ok"] and checks["hygiene_scanner"]["ok"]
+    hard_ok = checks["python"]["ok"] and checks["workspace_writable"]["ok"] and checks["hygiene_scanner"]["ok"] and proxy_check["ok"]
     return {"status": "ok" if hard_ok else "failed", "checks": checks}
