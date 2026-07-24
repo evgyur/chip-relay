@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import shlex
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 from .agent_loop import run_agent_loop
@@ -11,8 +10,18 @@ from .hermes_context import hermes_task_context
 from .recipes import list_recipes, load_recipe, pack_run, parse_params, prepare_recipe_run
 from .reports import artifacts_report, evidence_report
 from .verifier import verify_run
-from .workspace import init_run, resolve_run
+from .workspace import init_run, resolve_run, update_manifest
 from .playwright_runner import run_final_script
+from .protection import (
+    diagnose_run,
+    install_fingerprint_observer,
+    protection_summary,
+    read_bounded_json_object,
+    record_page_signals,
+    sanitize_observer_snapshot,
+)
+from .init_scripts import list_init_scripts
+
 
 SCHEMA = "chip-relay-adapter-response-v1"
 
@@ -74,7 +83,7 @@ def relay_text_response(config: RelayConfig, text: str) -> RelayAdapterResult:
 
 def _task_response(config: RelayConfig, tokens: list[str]) -> RelayAdapterResult:
     if not tokens:
-        return _fail("usage", "usage: /relay task <init|context|verify|show|artifacts|run|loop|pack>", command="task")
+        return _fail("usage", "usage: /relay task <init|context|verify|show|artifacts|protection|run|loop|pack>", command="task")
     action = tokens[0]
     if action == "init":
         if len(tokens) < 2:
@@ -111,6 +120,7 @@ def _task_response(config: RelayConfig, tokens: list[str]) -> RelayAdapterResult
             "status": verify.status,
             "run_id": verify.run_id,
             "failed_gate": verify.failed_gate,
+            "protection": verify.protection,
             "evidence": evidence,
         })
     if action == "show":
@@ -124,6 +134,12 @@ def _task_response(config: RelayConfig, tokens: list[str]) -> RelayAdapterResult
             return _fail("usage", "usage: /relay task artifacts <run_id>", command="task.artifacts")
         run_dir = resolve_run(config, tokens[1])
         return _ok("task.artifacts", {"status": "ok", "artifacts": artifacts_report(run_dir)})
+    if action == "protection":
+        try:
+            return _task_protection_response(config, tokens[1:])
+        except ValueError as exc:
+            gate = str(exc).split(":", 1)[0] or "protection_command_failed"
+            return _fail(gate, str(exc), command="task.protection")
     if action == "run":
         if len(tokens) != 2:
             return _fail("usage", "usage: /relay task run <run_id>", command="task.run")
@@ -135,6 +151,56 @@ def _task_response(config: RelayConfig, tokens: list[str]) -> RelayAdapterResult
     if action == "pack":
         return _task_pack_response(config, tokens[1:])
     return _fail("unknown_relay_command", f"unknown task command: {action}", command="task")
+
+
+def _read_protection_input(path_text: str) -> dict[str, Any]:
+    return read_bounded_json_object(path_text)
+
+
+def _task_protection_response(config: RelayConfig, tokens: list[str]) -> RelayAdapterResult:
+    usage = "usage: /relay task protection <run_id> <add|diagnose|show|observer-enable>"
+    if len(tokens) < 2:
+        return _fail("usage", usage, command="task.protection")
+    run_dir = resolve_run(config, tokens[0])
+    action = tokens[1]
+    if action == "diagnose" and len(tokens) == 2:
+        diagnosis = diagnose_run(run_dir)
+        return _ok("task.protection.diagnose", {"status": "diagnosed", "run_id": run_dir.name, "diagnosis": diagnosis})
+    if action == "show" and len(tokens) == 2:
+        summary = protection_summary(run_dir)
+        return _ok(
+            "task.protection.show",
+            {
+                "status": summary["status"],
+                "run_id": run_dir.name,
+                "protection": summary,
+            },
+        )
+    if action == "add":
+        if len(tokens) not in {4, 6} or tokens[2] != "--json-file":
+            return _fail("usage", f"{usage}; add requires --json-file <path> [--mode passive|instrumented]", command="task.protection")
+        mode = "passive"
+        if len(tokens) == 6:
+            if tokens[4] != "--mode" or tokens[5] not in {"passive", "instrumented"}:
+                return _fail("usage", "--mode must be passive or instrumented", command="task.protection")
+            mode = tokens[5]
+        raw = _read_protection_input(tokens[3])
+        if raw.get("schema") == "chip-relay-fingerprint-observer-v1":
+            snapshot = sanitize_observer_snapshot(raw)
+            signal = record_page_signals(run_dir, {"fingerprint_apis": snapshot["fingerprint_apis"]}, mode="instrumented")
+        else:
+            signal = record_page_signals(run_dir, raw, mode=mode)
+        return _ok("task.protection.add", {"status": "recorded", "run_id": run_dir.name, "signal": signal})
+    if action == "observer-enable" and len(tokens) in {2, 4}:
+        preset = "normal"
+        if len(tokens) == 4:
+            if tokens[2] != "--preset" or tokens[3] not in {"normal", "strict", "cf-sensitive"}:
+                return _fail("usage", "--preset must be normal, strict, or cf-sensitive", command="task.protection")
+            preset = tokens[3]
+        observer = install_fingerprint_observer(run_dir, enabled=True, preset=preset)
+        update_manifest(run_dir, lambda manifest: manifest.__setitem__("init_scripts", list_init_scripts(run_dir)))
+        return _ok("task.protection.observer-enable", {"status": "installed", "run_id": run_dir.name, "observer": observer})
+    return _fail("usage", usage, command="task.protection")
 
 
 def _task_loop_response(config: RelayConfig, tokens: list[str]) -> RelayAdapterResult:
@@ -236,4 +302,8 @@ def format_evidence_lines(evidence: dict[str, Any]) -> list[str]:
         f"hygiene: {evidence['hygiene']}",
         f"artifact_policy: {evidence['artifact_policy']}",
         f"blocker: {evidence['blocker']}",
+        f"protection: {evidence['protection']['provider'] or 'none'}",
+        f"protection_confidence: {evidence['protection']['confidence']}",
+        f"protection_blocker: {evidence['protection']['blocker_class']}",
+        f"protection_next_test: {evidence['protection']['next_test']}",
     ]

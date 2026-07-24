@@ -1,12 +1,12 @@
 ---
 name: chip-relay
 description: Portable browser relay skill for Hermes/agent automation. Use when you need a local CDP browser rail with switchable CloakBrowser and BrowserOS backends, persistent profiles, health checks, tab/open commands, or a public-safe /relay-style setup without private host paths or secrets.
-version: 0.1.0
+version: 0.2.0
 author: Hermes Agent
 license: MIT
 metadata:
   hermes:
-    tags: [browser, cdp, automation, cloakbrowser, browseros, relay]
+    tags: [browser, cdp, automation, cloakbrowser, browseros, relay, protection-diagnostics]
 ---
 
 # chip-relay
@@ -95,6 +95,10 @@ scripts/chip-relay task artifacts <run_id>
 scripts/chip-relay task network <run_id> add --json-file request.json
 scripts/chip-relay task network <run_id> search --url api --method GET
 scripts/chip-relay task network <run_id> export
+scripts/chip-relay task protection <run_id> add --json-file page-signals.json
+scripts/chip-relay task protection <run_id> diagnose
+scripts/chip-relay task protection <run_id> show
+scripts/chip-relay task protection <run_id> observer-enable --preset normal
 scripts/chip-relay task init-script <run_id> add webdriver --file init/webdriver.js
 scripts/chip-relay task init-script <run_id> list
 scripts/chip-relay cleanup
@@ -110,7 +114,12 @@ Production adapter rules:
 - `task show` prints compact operator evidence: run, rail, local CDP label, verification, artifact count, hygiene, blocker.
 - `relay [/relay] ...` maps Telegram/operator slash-command-shaped input to the safe task/recipe/artifact command surface and fails closed on unknown commands.
 - `artifacts` returns metadata only: paths, types, sizes, sensitivity. It must not print log/screenshot/result contents.
-- `task network` stores redacted request metadata under `network/`; sensitive headers/query tokens and bodies are not printed by default.
+- `task network` stores redacted request metadata under `network/`; all header values, query data, and opaque path segments are removed or hashed, and bodies are never retained. Pinned-descriptor I/O rejects symlinks, FIFOs, malformed rows, and oversized artifacts; base v1 rows are migrated in memory. JSON input files are capped at 64 KiB.
+- `task run` and `task verify` hold a run-scoped execution lock. Generation allocation and completion reread the authoritative manifest under a separate pinned-descriptor lock; stale attempt completion and child writes with a mismatched `CHIP_RELAY_ATTEMPT_ID` fail closed.
+- `task protection` emits `chip-relay-protection-diagnostic-v1` from normalized metadata for the manifest's current execution generation only. It will not diagnose a still-running generation, and specific blocker guidance requires status plus provider/profile evidence on the same sanitized observation. Passive mode is the default; it retains normalized names/counts internally and irreversible evidence keys, not cookie values, auth, bodies, raw DOM, storage, screenshots, or profile data.
+- Supported clean-room classes are Cloudflare, Akamai, DataDome, HUMAN/PerimeterX, Imperva, Kasada, AWS WAF, F5/Shape, reCAPTCHA, hCaptcha, and Turnstile. Each rule has an independent public source entry.
+- `task protection ... observer-enable` is explicit `instrumented` mode. It installs a bounded document-start API observer, can affect detectability, and is disabled by default. The current `normal`, `strict`, and `cf-sensitive` preset names are labels only; they do not alter observer behavior.
+- Protection output is diagnostic guidance only: no bypass, stealth, CAPTCHA-solving, proxy rotation, or success claim. Blocker classes and next tests are hypotheses.
 - `task init-script` stores pre-document JavaScript under `init_scripts/` and reports only name/size/SHA-256; `example-title` loads it before navigation.
 - `doctor webwright` includes browser environment, exact CDP binding, and redacted `CHIP_RELAY_PROXY` diagnostics.
 - `cleanup` is dry-run by default and may only remove relay-managed paths inside `CHIP_RELAY_BASE_DIR`.
@@ -122,7 +131,7 @@ Production adapter rules:
 - Use `task context --write` to persist `agent/hermes-context.json` for repeatable handoff without exposing artifact contents in chat.
 - Agent integrations that are not Hermes-in-process stay outside the public repo and connect through `--agent-command` plus `CHIP_RELAY_AGENT_CONTEXT`.
 - `scripts/chip-relay-agent-example` is a deterministic public-safe external-agent example for loop smoke tests; it is not a provider integration.
-- Run IDs must not contain path components or escape `runs_dir`; verification must require fresh artifacts from the current attempt; browser cookie/profile dumps must fail hygiene.
+- Run IDs must not contain path components or escape `runs_dir`; every task run/verify increments a durable attempt ID, verification must require fresh artifacts from that attempt, and browser cookie/profile dumps must fail hygiene. Linux execution/manifest serialization also uses a non-replaceable abstract Unix-socket authority; malformed execution records fail closed, and only a missing record receives legacy generation-zero migration.
 
 ## Output Contract
 
@@ -143,17 +152,7 @@ scripts/chip-relay doctor
 scripts/chip-relay --json status
 bash -n scripts/chip-relay scripts/chip-relay.sh scripts/install-cloakbrowser.sh scripts/chip-relay-watchdog.sh
 python3 -m py_compile chip_relay/*.py
-python3 tests/test_task_workspace.py
-python3 tests/test_task_verify.py
-python3 tests/test_task_run_pack.py
-python3 tests/test_recipe_commands.py
-python3 tests/test_agent_loop.py
-python3 tests/test_hermes_workflow_context.py -v
-python3 tests/test_bundled_agent_example.py
-python3 tests/test_production_adapter.py
-python3 tests/test_relay_adapter.py -v
-python3 tests/test_review_hardening.py -v
-python3 tests/test_stealth_browser_mcp_adoption.py -v
+python3 -m unittest discover -s tests -p 'test_*.py' -v
 python3 tests/test_public_hygiene.py
 python3 tests/test_shell_syntax.py
 ```
@@ -180,4 +179,5 @@ scripts/chip-relay kill
 
 - `README.md` — full setup and command reference.
 - `references/security.md` — public repo hygiene and CDP exposure rules.
+- `docs/protection-diagnostics-sources.md` — clean-room provenance, source, privacy, and no-bypass contract.
 - `templates/chip-relay.env.example` — configuration template.

@@ -5,20 +5,19 @@ import json
 import os
 import pathlib
 import subprocess
+import sys
 import tempfile
-import textwrap
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "chip-relay"
 
-import sys
 sys.path.insert(0, str(ROOT))
 
-from chip_relay.environment import cdp_binding
-from chip_relay.network import record_observation, search_observations
-from chip_relay.proxy import merge_proxy_server_arg, parse_proxy_config, redact_launch_arg
-from chip_relay.uploads import validate_upload_paths
+from chip_relay.environment import cdp_binding  # noqa: E402
+from chip_relay.network import record_observation, search_observations  # noqa: E402
+from chip_relay.proxy import merge_proxy_server_arg, parse_proxy_config, redact_launch_arg  # noqa: E402
+from chip_relay.uploads import validate_upload_paths  # noqa: E402
 
 
 class StealthBrowserMcpAdoptionTests(unittest.TestCase):
@@ -168,7 +167,8 @@ class StealthBrowserMcpAdoptionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             base = pathlib.Path(tmp) / "base"
             outside = pathlib.Path(tmp) / "outside"
-            base.mkdir(); outside.mkdir()
+            base.mkdir()
+            outside.mkdir()
             outside_profile = outside / "profile"
             outside_profile.mkdir()
             (base / "state.json").write_text(json.dumps({"pid": 99999999, "profileDir": str(outside_profile)}), encoding="utf-8")
@@ -192,7 +192,8 @@ class StealthBrowserMcpAdoptionTests(unittest.TestCase):
             base = pathlib.Path(tmp)
             allowed = base / "allowed"
             outside = base / "outside"
-            allowed.mkdir(); outside.mkdir()
+            allowed.mkdir()
+            outside.mkdir()
             good = allowed / "file.txt"
             good.write_text("ok", encoding="utf-8")
             bad = outside / "file.txt"

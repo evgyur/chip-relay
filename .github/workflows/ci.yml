@@ -7,6 +7,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -14,26 +16,16 @@ jobs:
         run: python3 tests/test_public_hygiene.py
       - name: Python compile
         run: python3 -m py_compile chip_relay/*.py
-      - name: Task workspace tests
-        run: python3 tests/test_task_workspace.py
-      - name: Task verify tests
-        run: python3 tests/test_task_verify.py
-      - name: Task run/pack tests
-        run: python3 tests/test_task_run_pack.py
-      - name: Recipe command tests
-        run: python3 tests/test_recipe_commands.py
-      - name: Agent loop tests
-        run: python3 tests/test_agent_loop.py
-      - name: Hermes workflow context tests
-        run: python3 tests/test_hermes_workflow_context.py
-      - name: Bundled agent example tests
-        run: python3 tests/test_bundled_agent_example.py
-      - name: Production adapter tests
-        run: python3 tests/test_production_adapter.py
-      - name: Relay adapter tests
-        run: python3 tests/test_relay_adapter.py
-      - name: Review hardening tests
-        run: python3 tests/test_review_hardening.py
+      - name: Full Python test discovery
+        run: python3 -m unittest discover -s tests -p 'test_*.py' -v
+      - name: Reproduce clean-room provenance audit
+        run: |
+          git clone --quiet https://github.com/scrapfly/Antibot-Detector.git /tmp/antibot-detector
+          git -C /tmp/antibot-detector checkout --quiet e5341e9ff4e3fdd5302a93980d74b9923686e987
+          python3 scripts/audit-protection-clean-room.py \
+            --repo-root . \
+            --upstream-root /tmp/antibot-detector \
+            --check docs/protection-diagnostics-clean-room-audit.json
       - name: Shell syntax
         run: python3 tests/test_shell_syntax.py
       - name: Skill guard

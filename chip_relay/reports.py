@@ -9,6 +9,7 @@ from .config import RelayConfig
 from .workspace import load_manifest
 from .init_scripts import list_init_scripts
 from .network import load_observations
+from .protection import protection_summary
 
 ARTIFACT_POLICY = "private-local/no-auto-send"
 
@@ -34,6 +35,7 @@ def artifact_metadata(run_dir: Path) -> list[dict[str, Any]]:
         ("init_scripts", "init_script"),
         ("logs", "log"),
         ("network", "network"),
+        ("protection", "protection-diagnostic"),
         ("results", "result"),
         ("screenshots", "screenshot"),
         ("traces", "trace"),
@@ -102,6 +104,7 @@ def evidence_report(config: RelayConfig, run_dir: Path) -> dict[str, Any]:
             "count": len(load_observations(run_dir)),
             "artifact_policy": "metadata-only/redacted",
         },
+        "protection": protection_summary(run_dir),
         "artifact_policy": ARTIFACT_POLICY,
         "delivery": "metadata-only",
         "blocker": blocker_for(manifest),

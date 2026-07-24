@@ -6,15 +6,15 @@ import os
 import pathlib
 import shutil
 import subprocess
+import sys
 import tempfile
 import textwrap
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-import sys
 sys.path.insert(0, str(ROOT))
 
-from chip_relay.reports import _local_cdp_label
+from chip_relay.reports import _local_cdp_label  # noqa: E402
 
 SCRIPT = ROOT / "scripts" / "chip-relay"
 

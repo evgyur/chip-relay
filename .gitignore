@@ -18,3 +18,5 @@ test-results/
 .cloakbrowser/
 cloakbrowser-cache/
 cloakbrowser-venv/
+.supergoal/
+.shaw/

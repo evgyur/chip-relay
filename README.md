@@ -108,6 +108,10 @@ scripts/chip-relay task artifacts <run_id>
 scripts/chip-relay task network <run_id> add --json-file request.json
 scripts/chip-relay task network <run_id> search --url api --method GET
 scripts/chip-relay task network <run_id> export
+scripts/chip-relay task protection <run_id> add --json-file page-signals.json
+scripts/chip-relay task protection <run_id> diagnose
+scripts/chip-relay task protection <run_id> show
+scripts/chip-relay task protection <run_id> observer-enable --preset normal
 scripts/chip-relay task init-script <run_id> add webdriver --file init/webdriver.js
 scripts/chip-relay task init-script <run_id> list
 scripts/chip-relay cleanup
@@ -134,11 +138,12 @@ Default runtime paths:
 ├── screenshots/
 ├── traces/
 ├── results/
+├── protection/
 ├── agent/
 └── verification/
 ```
 
-`task run` executes `scripts/final.py` once, captures `logs/run.log`, injects `CHIP_RELAY_CDP_URL`, and marks the manifest `ran` or `failed`.
+`task run` executes `scripts/final.py` once, captures `logs/run.log`, injects `CHIP_RELAY_CDP_URL`, and marks the manifest `ran` or `failed`. Run and verify executions are serialized by a run-scoped lock. On Linux, a non-replaceable abstract Unix-socket authority backs the pinned-descriptor lock files, so unlink/recreation cannot bypass serialization. Execution IDs are monotonic; malformed execution state fails closed, while only a manifest with no `execution` record is treated as legacy generation zero.
 
 `task context` is the Hermes-native workflow primitive. It returns `chip-relay-hermes-workflow-context-v1`: task, `task_brief`, rail, editable files, verify/show/artifacts commands, current verification state, evidence summary, and metadata-only artifact paths. This is the preferred integration when Hermes itself is the agent: Hermes reads the brief, edits `scripts/final.py`, runs `task verify`, reads structured feedback/evidence, and never sends artifact contents to chat by default. `--write` stores the same context at `agent/hermes-context.json` for repeatable handoff.
 
@@ -154,9 +159,31 @@ output: write or update runs/<id>/scripts/final.py plus any private-local artifa
 rule:   do not dump cookies, auth headers, browser profiles, or raw tokens
 ```
 
-`task verify` is the completion gate. It compiles and runs `scripts/final.py`, captures a redacted `logs/verify.log`, requires fresh final logs/results or screenshots from the current verify attempt, writes `verification/verify-result.json`, runs a hygiene scan into `verification/hygiene-report.json`, and updates `manifest.json` to `verified` or `failed`. It currently implements `same-rail`; unimplemented strengths fail closed instead of pretending isolation.
+`task verify` is the completion gate. Under the run-scoped execution lock, it atomically allocates the next manifest generation from the authoritative manifest before running `scripts/final.py`, captures a redacted `logs/verify.log`, requires fresh final logs/results or screenshots from that attempt, writes `verification/verify-result.json`, runs a hygiene scan into `verification/hygiene-report.json`, and updates `manifest.json` to `verified` or `failed`. Completion is accepted only for that attempt ID, and child signal writes must match `CHIP_RELAY_ATTEMPT_ID`. Protection diagnosis uses only observations tagged with the current attempt ID, so concurrent or same-second reruns cannot inherit or mix an older blocker. It currently implements `same-rail`; unimplemented strengths fail closed instead of pretending isolation.
 
-Network observations are stored under `network/` inside the run. `task network add/search/export` is metadata-first: URLs have token-like query values redacted, sensitive headers such as `Authorization`, `Cookie`, and `Set-Cookie` are replaced with `[REDACTED]`, and request/response bodies are represented only as presence/byte metadata. The exported JSON is a private-local artifact and is never printed as raw captured content by default.
+Network observations are stored under `network/` inside the run. `task network add/search/export` is metadata-first: URL query/fragment/userinfo data is removed, non-allowlisted path segments are one-way hashed, every header value is replaced with `[REDACTED]`, and request/response bodies are represented only as presence/byte metadata. Reads and writes use pinned descriptors, reject symlinks/non-regular files, enforce byte caps, and fail closed on malformed records. Base v1 observations are migrated to the closed schema in memory. The exported JSON is a private-local artifact and is never printed as raw captured content by default.
+
+### Protection diagnostics
+
+The native protection layer classifies normalized network and page metadata with schema `chip-relay-protection-diagnostic-v1`. It is diagnostic-only: there is **no bypass**, stealth, CAPTCHA-solving, proxy-rotation, or success guarantee.
+
+```bash
+# page-signals.json may contain only normalized URL/status/class/marker/name fields
+scripts/chip-relay task protection <run_id> add --json-file page-signals.json
+scripts/chip-relay task protection <run_id> diagnose
+scripts/chip-relay task protection <run_id> show
+
+# intrusive and disabled by default
+scripts/chip-relay task protection <run_id> observer-enable --preset normal
+```
+
+Passive mode is the default. Modes are `passive` (default) and `instrumented` (explicit opt-in). JSON inputs are capped at 64 KiB. It combines origin plus allowlisted/hashed URL-path metadata and statuses with header names, cookie names, normalized page markers, and known window keys; query data and all header values are removed. Specific blocker guidance requires status and provider/profile evidence on the same sanitized observation, and diagnosis refuses an execution generation while it is still running. It never persists cookie values, authorization material, request or response bodies, raw DOM text, screenshots, storage contents, or profile data. Diagnosis artifacts stay private-local under `protection/`; evidence keys are irreversible SHA-256 prefixes, while `task show`, verifier evidence, and Hermes context expose only compact provider, confidence, blocker hypothesis, next test, count, and path metadata.
+
+The optional `observer-enable` command installs a document-start init script through the existing run rail. This `instrumented` mode wraps selected browser APIs for ten seconds, restores wrappers transactionally, and retains only API names plus bounded call counts. It captures no call payload data or browser contents. Instrumentation is intrusive, can affect detectability, and cannot prove stealth or bypass. Its `normal`, `strict`, and `cf-sensitive` preset names are currently labels only and do not change observer behavior.
+
+The clean-room baseline covers Cloudflare, Akamai Bot Manager, DataDome, HUMAN/PerimeterX, Imperva, Kasada, AWS WAF, F5/Shape, reCAPTCHA, hCaptcha, and Turnstile. Every rule carries an independent public source URL in `chip_relay/rules/protections-v1.json`. The external Scrapfly project informed only the product category and threat-model review; no NPOSL code, JSON signatures, UI, extension, or runtime dependency is included. See `docs/protection-diagnostics-sources.md`.
+
+Blocker guidance is explicitly hypothetical and distinguishes manual CAPTCHA, rate limiting, likely IP reputation, likely persistent profile state, fingerprint inconsistency, and unknown. Ordered next tests change one variable at a time; automatic bypass and egress rotation remain out of scope.
 
 Init scripts live under `init_scripts/` inside the run. `task init-script add/list` reports only name, size, and SHA-256. The `example-title` Playwright/CDP template loads these scripts with `context.add_init_script(...)` before navigation, which is the right place for webdriver/language/timezone/WebGL consistency patches.
 

@@ -12,7 +12,7 @@ from typing import Any
 from .config import RelayConfig
 from .hygiene import redact_text
 from .verifier import verify_run
-from .workspace import load_manifest, write_manifest
+from .workspace import load_manifest, update_manifest
 
 
 @dataclass(frozen=True)
@@ -65,15 +65,16 @@ def _agent_command_tokens(agent_command: str) -> list[str]:
 
 
 def _update_manifest(run_dir: Path, result: AgentLoopResult) -> None:
-    manifest = load_manifest(run_dir)
-    manifest["updated_at"] = utc_now_text()
-    manifest["agent_loop"] = {
-        "status": result.status,
-        "attempts": result.attempts,
-        "failed_gate": result.failed_gate,
-        "updated_at": utc_now_text(),
-    }
-    write_manifest(run_dir, manifest)
+    def apply_result(manifest: dict[str, Any]) -> None:
+        manifest["updated_at"] = utc_now_text()
+        manifest["agent_loop"] = {
+            "status": result.status,
+            "attempts": result.attempts,
+            "failed_gate": result.failed_gate,
+            "updated_at": utc_now_text(),
+        }
+
+    update_manifest(run_dir, apply_result)
 
 
 def _fail(run_dir: Path, run_id: str, attempts: int, gate: str, verification: dict[str, Any] | None = None) -> AgentLoopResult:

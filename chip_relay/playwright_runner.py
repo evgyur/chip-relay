@@ -16,7 +16,13 @@ from .config import RelayConfig
 from .environment import browser_environment
 from .hygiene import redact_text, scan_path
 from .proxy import ProxyConfigError, parse_proxy_config, redact_proxy_url
-from .workspace import load_manifest, write_manifest
+from .workspace import (
+    begin_execution_attempt,
+    execution_marker,
+    execution_run_lock,
+    load_manifest,
+    update_execution_attempt,
+)
 
 
 @dataclass(frozen=True)
@@ -66,7 +72,13 @@ def ensure_cdp(cdp_url: str) -> None:
 
 
 def run_final_script(run_dir: Path, *, config: RelayConfig, timeout: int = 180) -> RunResult:
+    with execution_run_lock(run_dir):
+        return _run_final_script_locked(run_dir, config=config, timeout=timeout)
+
+
+def _run_final_script_locked(run_dir: Path, *, config: RelayConfig, timeout: int) -> RunResult:
     manifest = load_manifest(run_dir)
+    manifest = begin_execution_attempt(run_dir, manifest, source="task-run")
     final_script = run_dir / "scripts" / "final.py"
     log_path = run_dir / "logs" / "run.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -79,6 +91,12 @@ def run_final_script(run_dir: Path, *, config: RelayConfig, timeout: int = 180) 
     env = os.environ.copy()
     env.setdefault("CHIP_RELAY_CDP_URL", config.cdp_url)
     env.setdefault("CHIP_RELAY_RUN_DIR", str(run_dir))
+    env["CHIP_RELAY_ATTEMPT_ID"] = str(execution_marker(manifest)["attempt_id"])
+    package_root = str(Path(__file__).resolve().parents[1])
+    inherited_pythonpath = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = os.pathsep.join(
+        [package_root, inherited_pythonpath] if inherited_pythonpath else [package_root]
+    )
     env.setdefault("PYTHONUNBUFFERED", "1")
 
     try:
@@ -118,13 +136,18 @@ def run_final_script(run_dir: Path, *, config: RelayConfig, timeout: int = 180) 
 
 
 def _update_run_manifest(run_dir: Path, manifest: dict[str, Any], result: RunResult) -> None:
-    manifest["status"] = result.status
-    manifest["updated_at"] = utc_now_text()
-    manifest["run"] = {
-        "last_result": result.as_dict(),
-        "last_run_at": utc_now_text(),
-    }
-    write_manifest(run_dir, manifest)
+    attempt_id = str(execution_marker(manifest)["attempt_id"])
+
+    def apply_result(authoritative: dict[str, Any]) -> None:
+        authoritative["status"] = result.status
+        authoritative["updated_at"] = utc_now_text()
+        authoritative["run"] = {
+            "last_result": result.as_dict(),
+            "last_run_at": utc_now_text(),
+        }
+
+    phase = "completed" if result.status == "ran" else "failed"
+    update_execution_attempt(run_dir, attempt_id, apply_result, phase=phase)
 
 
 def doctor_webwright(config: RelayConfig) -> dict[str, Any]:

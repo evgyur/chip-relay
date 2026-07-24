@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 from __future__ import annotations
-import pathlib, re, sys
+import pathlib
+import re
+import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 TEXT_SUFFIXES = {'.md', '.sh', '.py', '.yml', '.yaml', '.example', '.gitignore', ''}

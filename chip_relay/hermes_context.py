@@ -63,10 +63,13 @@ def hermes_task_context(config: RelayConfig, run_dir: Path, *, write: bool = Fal
             "run": f"scripts/chip-relay task run {run_id}",
             "verify": f"scripts/chip-relay task verify {run_id}",
             "show": f"scripts/chip-relay task show {run_id}",
+            "protection_diagnose": f"scripts/chip-relay task protection {run_id} diagnose",
+            "protection_show": f"scripts/chip-relay task protection {run_id} show",
             "artifacts": f"scripts/chip-relay task artifacts {run_id}",
             "pack": f"scripts/chip-relay task pack {run_id} --name <recipe-name>",
         },
         "verification": verification,
+        "protection": evidence["protection"],
         "evidence": evidence,
         "artifacts": {
             "count": len(artifact_index.get("artifacts", [])),

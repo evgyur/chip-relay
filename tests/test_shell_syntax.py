@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
-import pathlib, subprocess, sys
+import pathlib
+import subprocess
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 scripts = sorted((ROOT / 'scripts').glob('*.sh')) + [ROOT / 'scripts' / 'chip-relay']
 for script in scripts:

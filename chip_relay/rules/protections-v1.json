@@ -1,0 +1,160 @@
+{
+  "schema": "chip-relay-protection-rules-v1",
+  "revision": "2026-07-23-clean-room-v1",
+  "rules": [
+    {
+      "id": "cloudflare.challenge",
+      "provider": "Cloudflare",
+      "category": "anti_bot",
+      "source": {
+        "title": "Cloudflare challenge response detection",
+        "url": "https://developers.cloudflare.com/cloudflare-challenges/challenge-types/challenge-pages/detect-response/"
+      },
+      "signals": [
+        {"method": "header_name", "pattern": "^cf-mitigated$", "weight": 85, "strength": "strong"},
+        {"method": "cookie_name", "pattern": "^cf_clearance$", "weight": 80, "strength": "strong"},
+        {"method": "url", "pattern": "challenges\\.cloudflare\\.com", "weight": 70, "strength": "strong"}
+      ]
+    },
+    {
+      "id": "akamai.bot-manager",
+      "provider": "Akamai",
+      "category": "anti_bot",
+      "source": {
+        "title": "Akamai _abck cookie reference",
+        "url": "https://kameleo.io/glossary/akamai-abck-cookie"
+      },
+      "signals": [
+        {"method": "cookie_name", "pattern": "^_abck$", "weight": 80, "strength": "strong"},
+        {"method": "cookie_name", "pattern": "^ak_bmsc$", "weight": 70, "strength": "strong"},
+        {"method": "cookie_name", "pattern": "^bm_sz$", "weight": 55, "strength": "medium"}
+      ]
+    },
+    {
+      "id": "datadome.bot-protection",
+      "provider": "DataDome",
+      "category": "anti_bot",
+      "source": {
+        "title": "DataDome cookie and session storage",
+        "url": "https://docs.datadome.co/docs/cookie-session-storage"
+      },
+      "signals": [
+        {"method": "cookie_name", "pattern": "^datadome$", "weight": 85, "strength": "strong"},
+        {"method": "header_name", "pattern": "^x-datadome-cid$", "weight": 85, "strength": "strong"},
+        {"method": "url", "pattern": "(?:geo\\.)?captcha-delivery\\.com", "weight": 75, "strength": "strong"}
+      ]
+    },
+    {
+      "id": "human.perimeterx",
+      "provider": "HUMAN/PerimeterX",
+      "category": "anti_bot",
+      "source": {
+        "title": "HUMAN Applications use of cookies and web storage",
+        "url": "https://docs.humansecurity.com/applications/use-of-cookies-web-storage"
+      },
+      "signals": [
+        {"method": "cookie_name", "pattern": "^_px3$", "weight": 80, "strength": "strong"},
+        {"method": "cookie_name", "pattern": "^_pxvid$", "weight": 65, "strength": "medium"},
+        {"method": "url", "pattern": "(?:px-cdn\\.net|px-cloud\\.net)", "weight": 70, "strength": "strong"}
+      ]
+    },
+    {
+      "id": "imperva.bot-management",
+      "provider": "Imperva",
+      "category": "anti_bot",
+      "source": {
+        "title": "Public service cookie notice describing Imperva cookies",
+        "url": "https://www.reminders.mot-testing.service.gov.uk/cookies"
+      },
+      "signals": [
+        {"method": "cookie_name", "pattern": "^visid_incap_", "weight": 80, "strength": "strong"},
+        {"method": "cookie_name", "pattern": "^incap_ses_", "weight": 75, "strength": "strong"},
+        {"method": "url", "pattern": "incapdns\\.net", "weight": 70, "strength": "strong"}
+      ]
+    },
+    {
+      "id": "kasada.client",
+      "provider": "Kasada",
+      "category": "anti_bot",
+      "source": {
+        "title": "Independent Kasada protocol overview",
+        "url": "https://shrotam.com/pages/kasada"
+      },
+      "signals": [
+        {"method": "header_name", "pattern": "^x-kpsdk-(?:ct|cd|cr)$", "weight": 85, "strength": "strong"},
+        {"method": "cookie_name", "pattern": "^KP_UIDz$", "weight": 75, "strength": "strong"},
+        {"method": "url", "pattern": "kpsdk", "weight": 55, "strength": "medium"}
+      ]
+    },
+    {
+      "id": "aws-waf.challenge",
+      "provider": "AWS WAF",
+      "category": "anti_bot",
+      "source": {
+        "title": "AWS WAF token details",
+        "url": "https://docs.aws.amazon.com/waf/latest/developerguide/waf-tokens-details.html"
+      },
+      "signals": [
+        {"method": "cookie_name", "pattern": "^aws-waf-token$", "weight": 90, "strength": "strong"},
+        {"method": "url", "pattern": "aws-waf-token", "weight": 75, "strength": "strong"},
+        {"method": "window_key", "pattern": "^AwsWafIntegration$", "weight": 70, "strength": "strong"}
+      ]
+    },
+    {
+      "id": "f5-shape.bot-defense",
+      "provider": "F5/Shape",
+      "category": "anti_bot",
+      "source": {
+        "title": "F5 SaaS Bot Defense configuration",
+        "url": "https://techdocs.f5.com/en-us/bigip-17-0-0/big-ip-saas-bot-defense/configuring-enterprise-botdefense.html"
+      },
+      "signals": [
+        {"method": "cookie_name", "pattern": "^(?:f5avr|TS[0-9a-f]{6,})$", "weight": 70, "strength": "strong"},
+        {"method": "header_name", "pattern": "^x-f5-", "weight": 65, "strength": "medium"},
+        {"method": "url", "pattern": "shape(?:security)?", "weight": 35, "strength": "weak"}
+      ]
+    },
+    {
+      "id": "google.recaptcha",
+      "provider": "reCAPTCHA",
+      "category": "captcha",
+      "source": {
+        "title": "Google reCAPTCHA introduction",
+        "url": "https://developers.google.com/recaptcha/intro"
+      },
+      "signals": [
+        {"method": "url", "pattern": "(?:google\\.com|gstatic\\.com)/recaptcha", "weight": 80, "strength": "strong"},
+        {"method": "window_key", "pattern": "^grecaptcha$", "weight": 75, "strength": "strong"},
+        {"method": "page_marker", "pattern": "^g-recaptcha$", "weight": 70, "strength": "strong"}
+      ]
+    },
+    {
+      "id": "hcaptcha.widget",
+      "provider": "hCaptcha",
+      "category": "captcha",
+      "source": {
+        "title": "hCaptcha configuration documentation",
+        "url": "https://docs.hcaptcha.com/configuration/"
+      },
+      "signals": [
+        {"method": "url", "pattern": "(?:js\\.)?hcaptcha\\.com", "weight": 80, "strength": "strong"},
+        {"method": "window_key", "pattern": "^hcaptcha$", "weight": 75, "strength": "strong"},
+        {"method": "page_marker", "pattern": "^h-captcha$", "weight": 70, "strength": "strong"}
+      ]
+    },
+    {
+      "id": "cloudflare.turnstile",
+      "provider": "Turnstile",
+      "category": "captcha",
+      "source": {
+        "title": "Cloudflare Turnstile client-side rendering",
+        "url": "https://developers.cloudflare.com/turnstile/get-started/client-side-rendering/"
+      },
+      "signals": [
+        {"method": "url", "pattern": "challenges\\.cloudflare\\.com/turnstile", "weight": 90, "strength": "strong"},
+        {"method": "window_key", "pattern": "^turnstile$", "weight": 75, "strength": "strong"},
+        {"method": "page_marker", "pattern": "^cf-turnstile$", "weight": 80, "strength": "strong"}
+      ]
+    }
+  ]
+}

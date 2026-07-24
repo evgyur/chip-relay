@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import py_compile
 import subprocess
 import sys
@@ -11,7 +12,13 @@ from pathlib import Path
 from typing import Any
 
 from .hygiene import redact_text, scan_path
-from .workspace import load_manifest, write_manifest
+from .workspace import (
+    begin_execution_attempt,
+    execution_marker,
+    execution_run_lock,
+    load_manifest,
+    update_execution_attempt,
+)
 
 
 @dataclass(frozen=True)
@@ -23,6 +30,7 @@ class VerifyResult:
     failed_gate: str | None = None
     exit_code: int | None = None
     log_tail: str | None = None
+    protection: dict[str, Any] | None = None
 
     def as_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -37,6 +45,8 @@ class VerifyResult:
             payload["exit_code"] = self.exit_code
         if self.log_tail:
             payload["log_tail"] = self.log_tail
+        if self.protection is not None:
+            payload["protection"] = self.protection
         return payload
 
 
@@ -47,6 +57,24 @@ def utc_now_text() -> str:
 def write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def _protection_feedback(run_dir: Path) -> dict[str, Any]:
+    from .protection import diagnose_run, protection_summary
+
+    try:
+        diagnose_run(run_dir)
+        return protection_summary(run_dir)
+    except ValueError:
+        return {
+            "status": "unavailable",
+            "mode": "passive",
+            "provider": None,
+            "confidence": 0,
+            "blocker_class": "unknown",
+            "next_test": "Repair the private protection artifact path and rerun verification.",
+            "evidence_count": 0,
+        }
 
 
 def artifact_index(run_dir: Path) -> list[dict[str, Any]]:
@@ -66,19 +94,44 @@ def artifact_index(run_dir: Path) -> list[dict[str, Any]]:
 
 
 def fail(run_dir: Path, manifest: dict[str, Any], gate: str, strength: str, exit_code: int | None = None, log_tail: str | None = None) -> VerifyResult:
-    manifest["status"] = "failed"
-    manifest["updated_at"] = utc_now_text()
-    manifest.setdefault("verification", {})["strength"] = strength
-    manifest["verification"]["last_result"] = {"status": "failed", "failed_gate": gate, "exit_code": exit_code}
-    manifest["artifacts"] = artifact_index(run_dir)
-    write_manifest(run_dir, manifest)
-    result = VerifyResult("failed", manifest.get("run_id", run_dir.name), run_dir, strength, gate, exit_code, log_tail)
+    attempt_id = str(execution_marker(manifest)["attempt_id"])
+
+    def apply_failure(authoritative: dict[str, Any]) -> None:
+        authoritative["status"] = "failed"
+        authoritative["updated_at"] = utc_now_text()
+        authoritative.setdefault("verification", {})["strength"] = strength
+        authoritative["verification"]["last_result"] = {"status": "failed", "failed_gate": gate, "exit_code": exit_code}
+        authoritative["artifacts"] = artifact_index(run_dir)
+
+    manifest = update_execution_attempt(run_dir, attempt_id, apply_failure, phase="failed")
+    protection = _protection_feedback(run_dir)
+    result = VerifyResult(
+        "failed",
+        manifest.get("run_id", run_dir.name),
+        run_dir,
+        strength,
+        gate,
+        exit_code,
+        log_tail,
+        protection,
+    )
     write_json(run_dir / "verification" / "verify-result.json", result.as_dict())
+    update_execution_attempt(
+        run_dir,
+        attempt_id,
+        lambda authoritative: authoritative.__setitem__("artifacts", artifact_index(run_dir)),
+    )
     return result
 
 
 def verify_run(run_dir: Path, *, strength: str = "same-rail") -> VerifyResult:
+    with execution_run_lock(run_dir):
+        return _verify_run_locked(run_dir, strength=strength)
+
+
+def _verify_run_locked(run_dir: Path, *, strength: str) -> VerifyResult:
     manifest = load_manifest(run_dir)
+    manifest = begin_execution_attempt(run_dir, manifest, source="verify")
     final_script = run_dir / "scripts" / "final.py"
     verify_log = run_dir / "logs" / "verify.log"
     verify_log.parent.mkdir(parents=True, exist_ok=True)
@@ -94,11 +147,21 @@ def verify_run(run_dir: Path, *, strength: str = "same-rail") -> VerifyResult:
     except py_compile.PyCompileError as exc:
         return fail(run_dir, manifest, "final_script_compile", strength, log_tail=redact_text(str(exc)))
 
+    attempt_id = execution_marker(manifest)["attempt_id"]
     verify_started_at = time.time()
+    env = os.environ.copy()
+    env["CHIP_RELAY_RUN_DIR"] = str(run_dir)
+    env["CHIP_RELAY_ATTEMPT_ID"] = str(attempt_id)
+    package_root = str(Path(__file__).resolve().parents[1])
+    inherited_pythonpath = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = os.pathsep.join(
+        [package_root, inherited_pythonpath] if inherited_pythonpath else [package_root]
+    )
     try:
         proc = subprocess.run(
             [sys.executable, str(final_script)],
             cwd=run_dir,
+            env=env,
             text=True,
             capture_output=True,
             timeout=120,
@@ -132,19 +195,35 @@ def verify_run(run_dir: Path, *, strength: str = "same-rail") -> VerifyResult:
     if hygiene_report["status"] != "ok":
         return fail(run_dir, manifest, "hygiene_scan", strength, log_tail=redact_text(json.dumps(hygiene_report, ensure_ascii=False)))
 
+    verified_at = utc_now_text()
     result_payload = {
         "status": "verified",
         "run_id": manifest.get("run_id", run_dir.name),
         "verification_strength": strength,
-        "verified_at": utc_now_text(),
+        "verified_at": verified_at,
     }
+
+    def apply_success(authoritative: dict[str, Any]) -> None:
+        authoritative["status"] = "verified"
+        authoritative["updated_at"] = utc_now_text()
+        authoritative.setdefault("verification", {})["strength"] = strength
+        authoritative["verification"]["last_result"] = result_payload
+        authoritative["artifacts"] = artifact_index(run_dir)
+
+    manifest = update_execution_attempt(run_dir, str(attempt_id), apply_success, phase="completed")
+
+    protection = _protection_feedback(run_dir)
+    result_payload["protection"] = protection
     write_json(run_dir / "verification" / "verify-result.json", result_payload)
-
-    manifest["status"] = "verified"
-    manifest["updated_at"] = utc_now_text()
-    manifest.setdefault("verification", {})["strength"] = strength
-    manifest["verification"]["last_result"] = result_payload
-    manifest["artifacts"] = artifact_index(run_dir)
-    write_manifest(run_dir, manifest)
-
-    return VerifyResult("verified", manifest.get("run_id", run_dir.name), run_dir, strength)
+    update_execution_attempt(
+        run_dir,
+        str(attempt_id),
+        lambda authoritative: authoritative.__setitem__("artifacts", artifact_index(run_dir)),
+    )
+    return VerifyResult(
+        "verified",
+        manifest.get("run_id", run_dir.name),
+        run_dir,
+        strength,
+        protection=protection,
+    )

@@ -1,0 +1,46 @@
+{
+  "cloudflare.challenge": {
+    "positive": {"header_names": ["cf-mitigated"]},
+    "negative": {"header_names": ["cf-mitigated-extra"]}
+  },
+  "akamai.bot-manager": {
+    "positive": {"cookie_names": ["_abck"]},
+    "negative": {"cookie_names": ["_abckx"]}
+  },
+  "datadome.bot-protection": {
+    "positive": {"header_names": ["x-datadome-cid"]},
+    "negative": {"header_names": ["x-datadome"]}
+  },
+  "human.perimeterx": {
+    "positive": {"cookie_names": ["_px3"]},
+    "negative": {"cookie_names": ["px3"]}
+  },
+  "imperva.bot-management": {
+    "positive": {"cookie_names": ["visid_incap_123"]},
+    "negative": {"cookie_names": ["visid-incap-123"]}
+  },
+  "kasada.client": {
+    "positive": {"header_names": ["x-kpsdk-ct"]},
+    "negative": {"header_names": ["x-kpsdk"]}
+  },
+  "aws-waf.challenge": {
+    "positive": {"cookie_names": ["aws-waf-token"]},
+    "negative": {"cookie_names": ["aws-waf-token-extra"]}
+  },
+  "f5-shape.bot-defense": {
+    "positive": {"cookie_names": ["TSabcdef"]},
+    "negative": {"cookie_names": ["TSabcde"]}
+  },
+  "google.recaptcha": {
+    "positive": {"window_keys": ["grecaptcha"]},
+    "negative": {"window_keys": ["grecaptchaEnterprise"]}
+  },
+  "hcaptcha.widget": {
+    "positive": {"window_keys": ["hcaptcha"]},
+    "negative": {"window_keys": ["hcaptchaWidget"]}
+  },
+  "cloudflare.turnstile": {
+    "positive": {"window_keys": ["turnstile"]},
+    "negative": {"window_keys": ["turnstileWidget"]}
+  }
+}

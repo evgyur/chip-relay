@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 from pathlib import Path
+from typing import Any
 
 from .agent_loop import run_agent_loop
 from .cleanup import run_cleanup
@@ -12,12 +12,20 @@ from .hermes_context import hermes_task_context
 from .init_scripts import add_init_script, list_init_scripts
 from .network import export_network_metadata, record_observation, search_observations
 from .playwright_runner import doctor_webwright, run_final_script
+from .protection import (
+    diagnose_run,
+    install_fingerprint_observer,
+    protection_summary,
+    read_bounded_json_object,
+    record_page_signals,
+    sanitize_observer_snapshot,
+)
 from .recipes import list_recipes, load_recipe, pack_run, parse_params, prepare_recipe_run
 from .relay_adapter import format_evidence_lines, relay_response
 from .reports import artifacts_report, evidence_report
 from .stealth import load_sample, stealth_doctor
 from .verifier import verify_run
-from .workspace import init_run, list_runs, load_manifest, resolve_run, write_manifest
+from .workspace import init_run, list_runs, load_manifest, resolve_run, update_manifest
 
 
 def emit(payload: object, *, json_mode: bool) -> None:
@@ -29,6 +37,10 @@ def emit(payload: object, *, json_mode: bool) -> None:
                 print(f"{key}: {value}")
         else:
             print(payload)
+
+
+def read_bounded_json_file(path_text: str, *, max_bytes: int = 65536) -> dict[str, Any]:
+    return read_bounded_json_object(path_text, max_bytes=max_bytes)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -89,6 +101,17 @@ def build_parser() -> argparse.ArgumentParser:
     network_search.add_argument("--offset", type=int, default=0)
     network_sub.add_parser("export")
 
+    protection = task_sub.add_parser("protection")
+    protection.add_argument("run")
+    protection_sub = protection.add_subparsers(dest="protection_command", required=True)
+    protection_add = protection_sub.add_parser("add")
+    protection_add.add_argument("--json-file", required=True)
+    protection_add.add_argument("--mode", choices=["passive", "instrumented"], default="passive")
+    protection_sub.add_parser("diagnose")
+    protection_sub.add_parser("show")
+    observer_enable = protection_sub.add_parser("observer-enable")
+    observer_enable.add_argument("--preset", choices=["normal", "strict", "cf-sensitive"], default="normal")
+
     init_script = task_sub.add_parser("init-script")
     init_script.add_argument("run")
     init_script_sub = init_script.add_subparsers(dest="init_script_command", required=True)
@@ -130,7 +153,7 @@ def build_parser() -> argparse.ArgumentParser:
 def cmd_task_network(args: argparse.Namespace, config) -> int:
     run_dir = resolve_run(config, args.run)
     if args.network_command == "add":
-        raw = json.loads(Path(args.json_file).read_text(encoding="utf-8"))
+        raw = read_bounded_json_file(args.json_file)
         payload = record_observation(run_dir, raw)
         emit({"status": "recorded", "run_id": run_dir.name, "observation": payload}, json_mode=args.json_mode)
         return 0
@@ -153,14 +176,53 @@ def cmd_task_network(args: argparse.Namespace, config) -> int:
     raise SystemExit(f"unknown network command: {args.network_command}")
 
 
+def cmd_task_protection(args: argparse.Namespace, config) -> int:
+    run_dir = resolve_run(config, args.run)
+    if args.protection_command == "add":
+        raw = read_bounded_json_file(args.json_file)
+        if isinstance(raw, dict) and raw.get("schema") == "chip-relay-fingerprint-observer-v1":
+            snapshot = sanitize_observer_snapshot(raw)
+            payload = record_page_signals(
+                run_dir,
+                {"fingerprint_apis": snapshot["fingerprint_apis"]},
+                mode="instrumented",
+            )
+        else:
+            payload = record_page_signals(run_dir, raw, mode=args.mode)
+        emit({"status": "recorded", "run_id": run_dir.name, "signal": payload}, json_mode=args.json_mode)
+        return 0
+    if args.protection_command == "diagnose":
+        diagnosis = diagnose_run(run_dir)
+        emit({"status": "diagnosed", "run_id": run_dir.name, "diagnosis": diagnosis}, json_mode=args.json_mode)
+        return 0
+    if args.protection_command == "show":
+        summary = protection_summary(run_dir)
+        emit(
+            {
+                "status": summary["status"],
+                "run_id": run_dir.name,
+                "protection": summary,
+            },
+            json_mode=args.json_mode,
+        )
+        return 0
+    if args.protection_command == "observer-enable":
+        payload = install_fingerprint_observer(run_dir, enabled=True, preset=args.preset)
+        update_manifest(run_dir, lambda manifest: manifest.__setitem__("init_scripts", list_init_scripts(run_dir)))
+        emit({"status": "installed", "run_id": run_dir.name, "observer": payload}, json_mode=args.json_mode)
+        return 0
+    raise SystemExit(f"unknown protection command: {args.protection_command}")
+
+
 def cmd_task_init_script(args: argparse.Namespace, config) -> int:
     run_dir = resolve_run(config, args.run)
     if args.init_script_command == "add":
         source = Path(args.file).read_text(encoding="utf-8")
         item = add_init_script(run_dir, args.name, source)
-        manifest = load_manifest(run_dir)
-        manifest["init_scripts"] = list_init_scripts(run_dir)
-        write_manifest(run_dir, manifest)
+        manifest = update_manifest(
+            run_dir,
+            lambda authoritative: authoritative.__setitem__("init_scripts", list_init_scripts(run_dir)),
+        )
         emit({"status": "added", "run_id": manifest.get("run_id", run_dir.name), "script": item}, json_mode=args.json_mode)
         return 0
     if args.init_script_command == "list":
@@ -190,11 +252,13 @@ def cmd_task(args: argparse.Namespace) -> int:
         return 0
     if args.task_command == "show":
         run_dir = resolve_run(config, args.run)
-        manifest = load_manifest(run_dir)
+        report = evidence_report(config, run_dir)
         if args.json_mode:
+            manifest = load_manifest(run_dir)
+            manifest["protection"] = report["protection"]
+            manifest["evidence"] = report
             print(json.dumps(manifest, ensure_ascii=False, indent=2))
         else:
-            report = evidence_report(config, run_dir)
             print(f"run: {report['run_id']}")
             print(f"status: {report['status']}")
             print(f"title: {report['title']}")
@@ -207,6 +271,10 @@ def cmd_task(args: argparse.Namespace) -> int:
             print(f"hygiene: {report['hygiene']}")
             print(f"artifact_policy: {report['artifact_policy']}")
             print(f"blocker: {report['blocker']}")
+            print(f"protection: {report['protection']['provider'] or 'none'}")
+            print(f"protection_confidence: {report['protection']['confidence']}")
+            print(f"protection_blocker: {report['protection']['blocker_class']}")
+            print(f"protection_next_test: {report['protection']['next_test']}")
         return 0
     if args.task_command == "artifacts":
         run_dir = resolve_run(config, args.run)
@@ -299,6 +367,8 @@ def cmd_task(args: argparse.Namespace) -> int:
         return 0 if result.status == "verified" else 1
     if args.task_command == "network":
         return cmd_task_network(args, config)
+    if args.task_command == "protection":
+        return cmd_task_protection(args, config)
     if args.task_command == "init-script":
         return cmd_task_init_script(args, config)
     raise SystemExit(f"unknown task command: {args.task_command}")
