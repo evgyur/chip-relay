@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import Any
 
 from .agent_loop import run_agent_loop
+from .captcha import captcha_summary, inspect_captcha_gate, wait_for_captcha_clearance
+from .captcha_visual import apply_captcha_visual_actions, capture_captcha_visual, parse_visual_points
 from .cleanup import run_cleanup
 from .config import load_config
 from .hermes_context import hermes_task_context
@@ -111,6 +113,25 @@ def build_parser() -> argparse.ArgumentParser:
     protection_sub.add_parser("show")
     observer_enable = protection_sub.add_parser("observer-enable")
     observer_enable.add_argument("--preset", choices=["normal", "strict", "cf-sensitive"], default="normal")
+
+    captcha = task_sub.add_parser("captcha")
+    captcha.add_argument("run")
+    captcha_sub = captcha.add_subparsers(dest="captcha_command", required=True)
+    captcha_inspect = captcha_sub.add_parser("inspect")
+    captcha_inspect.add_argument("--page-index", type=int, default=-1)
+    captcha_wait = captcha_sub.add_parser("wait")
+    captcha_wait.add_argument("--timeout", type=float, default=120)
+    captcha_wait.add_argument("--poll-interval", type=float, default=2)
+    captcha_wait.add_argument("--page-index", type=int, default=-1)
+    captcha_resume = captcha_sub.add_parser("resume")
+    captcha_resume.add_argument("--timeout", type=float, default=30)
+    captcha_resume.add_argument("--poll-interval", type=float, default=2)
+    captcha_resume.add_argument("--page-index", type=int, default=-1)
+    captcha_sub.add_parser("capture")
+    captcha_act = captcha_sub.add_parser("act")
+    captcha_act.add_argument("--point", action="append", required=True)
+    captcha_act.add_argument("--confidence", type=float, required=True)
+    captcha_sub.add_parser("show")
 
     init_script = task_sub.add_parser("init-script")
     init_script.add_argument("run")
@@ -231,6 +252,46 @@ def cmd_task_init_script(args: argparse.Namespace, config) -> int:
     raise SystemExit(f"unknown init-script command: {args.init_script_command}")
 
 
+def cmd_task_captcha(args: argparse.Namespace, config) -> int:
+    run_dir = resolve_run(config, args.run)
+    if args.captcha_command == "capture":
+        payload = capture_captcha_visual(config, run_dir)
+        emit({"status": payload["status"], "run_id": run_dir.name, "captcha_visual": payload}, json_mode=args.json_mode)
+        return 0
+    if args.captcha_command == "act":
+        points = parse_visual_points(args.point)
+        payload = apply_captcha_visual_actions(config, run_dir, points, confidence=args.confidence)
+        emit({"status": payload["status"], "run_id": run_dir.name, "captcha": payload}, json_mode=args.json_mode)
+        return 0 if payload["status"] == "cleared" else 1
+    if args.captcha_command == "inspect":
+        payload = inspect_captcha_gate(config, run_dir, page_index=args.page_index)
+        current = captcha_summary(run_dir)
+        if current["status"] == "stale":
+            emit({"status": "stale", "run_id": run_dir.name, "captcha": current}, json_mode=args.json_mode)
+            return 1
+        emit({"status": payload["status"], "run_id": run_dir.name, "captcha": payload}, json_mode=args.json_mode)
+        return 0
+    if args.captcha_command in {"wait", "resume"}:
+        payload = wait_for_captcha_clearance(
+            config,
+            run_dir,
+            timeout=args.timeout,
+            poll_interval=args.poll_interval,
+            page_index=args.page_index,
+        )
+        current = captcha_summary(run_dir)
+        if current["status"] == "stale":
+            emit({"status": "stale", "run_id": run_dir.name, "captcha": current}, json_mode=args.json_mode)
+            return 1
+        emit({"status": payload["status"], "run_id": run_dir.name, "captcha": payload}, json_mode=args.json_mode)
+        return 0 if payload["status"] == "cleared" else 1
+    if args.captcha_command == "show":
+        payload = captcha_summary(run_dir)
+        emit({"status": payload["status"], "run_id": run_dir.name, "captcha": payload}, json_mode=args.json_mode)
+        return 0
+    raise SystemExit(f"unknown captcha command: {args.captcha_command}")
+
+
 def cmd_task(args: argparse.Namespace) -> int:
     config = load_config()
     if args.task_command == "init":
@@ -275,6 +336,9 @@ def cmd_task(args: argparse.Namespace) -> int:
             print(f"protection_confidence: {report['protection']['confidence']}")
             print(f"protection_blocker: {report['protection']['blocker_class']}")
             print(f"protection_next_test: {report['protection']['next_test']}")
+            print(f"captcha: {report['captcha']['status']}")
+            print(f"captcha_provider: {report['captcha']['provider'] or 'none'}")
+            print(f"captcha_next_action: {report['captcha']['next_action']}")
         return 0
     if args.task_command == "artifacts":
         run_dir = resolve_run(config, args.run)
@@ -369,6 +433,8 @@ def cmd_task(args: argparse.Namespace) -> int:
         return cmd_task_network(args, config)
     if args.task_command == "protection":
         return cmd_task_protection(args, config)
+    if args.task_command == "captcha":
+        return cmd_task_captcha(args, config)
     if args.task_command == "init-script":
         return cmd_task_init_script(args, config)
     raise SystemExit(f"unknown task command: {args.task_command}")

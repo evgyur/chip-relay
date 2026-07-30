@@ -112,6 +112,12 @@ scripts/chip-relay task protection <run_id> add --json-file page-signals.json
 scripts/chip-relay task protection <run_id> diagnose
 scripts/chip-relay task protection <run_id> show
 scripts/chip-relay task protection <run_id> observer-enable --preset normal
+scripts/chip-relay task captcha <run_id> inspect
+scripts/chip-relay task captcha <run_id> wait --timeout 120
+scripts/chip-relay task captcha <run_id> capture
+scripts/chip-relay task captcha <run_id> act --confidence 0.93 --point 0.25,0.50 --point 0.75,0.50
+scripts/chip-relay task captcha <run_id> show
+scripts/chip-relay task captcha <run_id> resume --timeout 30
 scripts/chip-relay task init-script <run_id> add webdriver --file init/webdriver.js
 scripts/chip-relay task init-script <run_id> list
 scripts/chip-relay cleanup
@@ -184,6 +190,16 @@ The optional `observer-enable` command installs a document-start init script thr
 The clean-room baseline covers Cloudflare, Akamai Bot Manager, DataDome, HUMAN/PerimeterX, Imperva, Kasada, AWS WAF, F5/Shape, reCAPTCHA, hCaptcha, and Turnstile. Every rule carries an independent public source URL in `chip_relay/rules/protections-v1.json`. The external Scrapfly project informed only the product category and threat-model review; no NPOSL code, JSON signatures, UI, extension, or runtime dependency is included. See `docs/protection-diagnostics-sources.md`.
 
 Blocker guidance is explicitly hypothetical and distinguishes manual CAPTCHA, rate limiting, likely IP reputation, likely persistent profile state, fingerprint inconsistency, and unknown. Ordered next tests change one variable at a time; automatic bypass and egress rotation remain out of scope.
+
+### CAPTCHA gate and resume
+
+`task captcha` turns CAPTCHA from an opaque task failure into a bounded state machine. It inspects the selected live CDP page using boolean/count-only metadata, recognizes reCAPTCHA, hCaptcha, Turnstile, and Cloudflare managed challenges, and returns `clear`, `managed_wait`, or `human_required`.
+
+For browser-native managed challenges, `wait` observes the existing browser until clearance and returns `cleared`; it does not click or inject anything. The gate rejects malformed/contradictory probes, treats a pending hidden response field as `managed_wait`, and pins the original Chromium target across `inspect`/`resume`, so a new tab cannot cause false clearance. Cloudflare pages that also expose Turnstile receive a managed-wait window first, then become a human handoff if a visible widget remains at timeout.
+
+For an interactive challenge, `capture` is enabled only after `human_required` and takes a private-local screenshot of only the fully visible detected challenge region. A trusted local vision agent or operator can inspect that image and pass normalized challenge-relative points to `act`. Immediately before clicking, relay revalidates the Chromium document/loader identity, exact contained region, and live screenshot hash; it marks the authorization `applying` before any click, ends it as `consumed` only after a fully observed result or `uncertain` after an exception, clicks only the pinned page/document/region, re-inspects the gate, and returns `cleared` only when page metadata confirms clearance. Capture/action calls are serialized under the run lock. Region dimensions and pixel area are capped before screenshot allocation. The screenshot and its integrity-bound state are owner-only `0600`, attempt-bound, target- and document-pinned, and never exposed by the `/relay` response.
+
+This is deliberately not a universal CAPTCHA solver. There is no third-party solver dispatch, response-token injection, unattended answer-extraction service, or guaranteed bypass claim. The trusted local visual-assist loop is bounded to 12 points per capture and fails closed if the page, region, attempt, or screenshot changes. See `references/captcha-workflow.md`.
 
 Init scripts live under `init_scripts/` inside the run. `task init-script add/list` reports only name, size, and SHA-256. The `example-title` Playwright/CDP template loads these scripts with `context.add_init_script(...)` before navigation, which is the right place for webdriver/language/timezone/WebGL consistency patches.
 

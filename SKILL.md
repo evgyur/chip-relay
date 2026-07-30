@@ -1,7 +1,7 @@
 ---
 name: chip-relay
 description: Portable browser relay skill for Hermes/agent automation. Use when you need a local CDP browser rail with switchable CloakBrowser and BrowserOS backends, persistent profiles, health checks, tab/open commands, or a public-safe /relay-style setup without private host paths or secrets.
-version: 0.2.0
+version: 0.4.0
 author: Hermes Agent
 license: MIT
 metadata:
@@ -18,7 +18,8 @@ Use this skill when the user asks to:
 - switch between CloakBrowser and BrowserOS;
 - expose a safe local Chrome DevTools Protocol endpoint for Playwright/Puppeteer/CDP tools;
 - keep a persistent browser profile for authenticated automation;
-- diagnose bot-detection/browser fingerprint issues without copying private cookies or secrets.
+- diagnose bot-detection/browser fingerprint issues without copying private cookies or secrets;
+- detect CAPTCHA gates, wait for browser-native clearance, capture an interactive challenge privately for trusted local vision, apply bounded normalized clicks, and resume without exposing response tokens.
 
 ## Core model
 
@@ -99,6 +100,12 @@ scripts/chip-relay task protection <run_id> add --json-file page-signals.json
 scripts/chip-relay task protection <run_id> diagnose
 scripts/chip-relay task protection <run_id> show
 scripts/chip-relay task protection <run_id> observer-enable --preset normal
+scripts/chip-relay task captcha <run_id> inspect
+scripts/chip-relay task captcha <run_id> wait --timeout 120
+scripts/chip-relay task captcha <run_id> capture
+scripts/chip-relay task captcha <run_id> act --confidence 0.93 --point 0.25,0.50 --point 0.75,0.50
+scripts/chip-relay task captcha <run_id> show
+scripts/chip-relay task captcha <run_id> resume --timeout 30
 scripts/chip-relay task init-script <run_id> add webdriver --file init/webdriver.js
 scripts/chip-relay task init-script <run_id> list
 scripts/chip-relay cleanup
@@ -119,7 +126,8 @@ Production adapter rules:
 - `task protection` emits `chip-relay-protection-diagnostic-v1` from normalized metadata for the manifest's current execution generation only. It will not diagnose a still-running generation, and specific blocker guidance requires status plus provider/profile evidence on the same sanitized observation. Passive mode is the default; it retains normalized names/counts internally and irreversible evidence keys, not cookie values, auth, bodies, raw DOM, storage, screenshots, or profile data.
 - Supported clean-room classes are Cloudflare, Akamai, DataDome, HUMAN/PerimeterX, Imperva, Kasada, AWS WAF, F5/Shape, reCAPTCHA, hCaptcha, and Turnstile. Each rule has an independent public source entry.
 - `task protection ... observer-enable` is explicit `instrumented` mode. It installs a bounded document-start API observer, can affect detectability, and is disabled by default. The current `normal`, `strict`, and `cf-sensitive` preset names are labels only; they do not alter observer behavior.
-- Protection output is diagnostic guidance only: no bypass, stealth, CAPTCHA-solving, proxy rotation, or success claim. Blocker classes and next tests are hypotheses.
+- Protection output is diagnostic guidance only: no stealth, proxy rotation, or guaranteed bypass/success claim. The CAPTCHA gate may wait for browser-native managed clearance, then use a trusted local visual-assist loop or a person; it never dispatches a third-party solver or injects response tokens.
+- `task captcha ... inspect|wait|capture|act|show|resume` supports reCAPTCHA, hCaptcha, Turnstile, and Cloudflare challenge classification. Only after `human_required`, run `capture`, load the returned private-local image with Hermes' local vision tool, and run `act` only at confidence `>=0.85` with normalized challenge-relative points. `act` revalidates the hashed CDP document/loader identity, exact contained region, and live screenshot hash immediately before clicking, moves authorization to `applying` before any click and then to `consumed`/`uncertain`, and serializes capture/action calls under the run lock. Recapture after any stale or still-interactive result; stop after three visual cycles or any low-confidence challenge and use the trusted visible browser plus `resume`. Probe/state parsing is fail-closed; Cloudflare+Turnstile receives a browser-native wait window before visual/human handoff. State and challenge artifacts are mode `0600`, execution-attempt-bound, target- and document-pinned, integrity-checked, and never projected through `/relay`; Hermes context receives exact commands.
 - `task init-script` stores pre-document JavaScript under `init_scripts/` and reports only name/size/SHA-256; `example-title` loads it before navigation.
 - `doctor webwright` includes browser environment, exact CDP binding, and redacted `CHIP_RELAY_PROXY` diagnostics.
 - `cleanup` is dry-run by default and may only remove relay-managed paths inside `CHIP_RELAY_BASE_DIR`.
@@ -179,5 +187,6 @@ scripts/chip-relay kill
 
 - `README.md` — full setup and command reference.
 - `references/security.md` — public repo hygiene and CDP exposure rules.
+- `references/captcha-workflow.md` — detect → managed wait / human handoff → clearance → resume contract and privacy boundary.
 - `docs/protection-diagnostics-sources.md` — clean-room provenance, source, privacy, and no-bypass contract.
 - `templates/chip-relay.env.example` — configuration template.

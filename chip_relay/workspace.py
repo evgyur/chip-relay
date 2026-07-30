@@ -93,6 +93,7 @@ def default_manifest(config: RelayConfig, run_id: str, title: str, run_dir: Path
             "source": "init",
             "started_at": None,
             "completed_at": None,
+            "captcha_visual_cycle": 0,
         },
         "verification": {
             "required": ["final_script", "final_log", "hygiene_scan"],
@@ -469,13 +470,18 @@ def execution_marker(manifest: Any) -> dict[str, Any]:
     if "execution" not in manifest:
         return default
     execution = manifest["execution"]
-    if not isinstance(execution, dict) or set(execution) != {
+    required_execution_fields = {
         "generation",
         "attempt_id",
         "phase",
         "source",
         "started_at",
         "completed_at",
+    }
+    execution_fields = set(execution) if isinstance(execution, dict) else set()
+    if execution_fields not in {
+        frozenset(required_execution_fields),
+        frozenset(required_execution_fields | {"captcha_visual_cycle"}),
     }:
         raise ValueError("invalid_execution_state")
     generation = execution.get("generation")
@@ -484,6 +490,9 @@ def execution_marker(manifest: Any) -> dict[str, Any]:
     source = execution.get("source")
     started_at = execution.get("started_at")
     completed_at = execution.get("completed_at")
+    captcha_visual_cycle = execution.get("captcha_visual_cycle", 0)
+    if type(captcha_visual_cycle) is not int or not 0 <= captcha_visual_cycle <= 3:
+        raise ValueError("invalid_execution_state")
     if type(generation) is not int or not 0 <= generation <= 999_999_999_999:
         raise ValueError("invalid_execution_state")
     if not isinstance(attempt_id, str):
@@ -547,6 +556,7 @@ def begin_execution_attempt(run_dir: Path, _manifest: dict[str, Any], *, source:
             "source": source,
             "started_at": now,
             "completed_at": None,
+            "captcha_visual_cycle": 0,
         }
         manifest["status"] = "running"
         manifest["updated_at"] = now

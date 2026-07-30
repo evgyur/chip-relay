@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from .captcha import captcha_summary
 from .config import RelayConfig
 from .workspace import load_manifest
 from .init_scripts import list_init_scripts
@@ -12,6 +13,10 @@ from .network import load_observations
 from .protection import protection_summary
 
 ARTIFACT_POLICY = "private-local/no-auto-send"
+_UNINDEXED_PRIVATE_ARTIFACTS = {
+    "protection/captcha-visual.json",
+    "protection/captcha-visual.png",
+}
 
 
 def _local_cdp_label(cdp_url: str) -> str:
@@ -47,9 +52,12 @@ def artifact_metadata(run_dir: Path) -> list[dict[str, Any]]:
         for path in sorted(root.rglob("*")):
             if not path.is_file():
                 continue
+            relative = str(path.relative_to(run_dir))
+            if relative in _UNINDEXED_PRIVATE_ARTIFACTS:
+                continue
             artifacts.append({
                 "type": kind,
-                "path": str(path.relative_to(run_dir)),
+                "path": relative,
                 "size_bytes": path.stat().st_size,
                 "sensitivity": "private-local",
             })
@@ -105,6 +113,7 @@ def evidence_report(config: RelayConfig, run_dir: Path) -> dict[str, Any]:
             "artifact_policy": "metadata-only/redacted",
         },
         "protection": protection_summary(run_dir),
+        "captcha": captcha_summary(run_dir),
         "artifact_policy": ARTIFACT_POLICY,
         "delivery": "metadata-only",
         "blocker": blocker_for(manifest),

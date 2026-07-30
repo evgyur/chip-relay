@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from .agent_loop import run_agent_loop
+from .captcha import captcha_summary, inspect_captcha_gate, wait_for_captcha_clearance
+from .captcha_visual import apply_captcha_visual_actions, capture_captcha_visual, parse_visual_points
 from .config import RelayConfig
 from .hermes_context import hermes_task_context
 from .recipes import list_recipes, load_recipe, pack_run, parse_params, prepare_recipe_run
@@ -83,7 +85,7 @@ def relay_text_response(config: RelayConfig, text: str) -> RelayAdapterResult:
 
 def _task_response(config: RelayConfig, tokens: list[str]) -> RelayAdapterResult:
     if not tokens:
-        return _fail("usage", "usage: /relay task <init|context|verify|show|artifacts|protection|run|loop|pack>", command="task")
+        return _fail("usage", "usage: /relay task <init|context|verify|show|artifacts|protection|captcha|run|loop|pack>", command="task")
     action = tokens[0]
     if action == "init":
         if len(tokens) < 2:
@@ -140,6 +142,12 @@ def _task_response(config: RelayConfig, tokens: list[str]) -> RelayAdapterResult
         except ValueError as exc:
             gate = str(exc).split(":", 1)[0] or "protection_command_failed"
             return _fail(gate, str(exc), command="task.protection")
+    if action == "captcha":
+        try:
+            return _task_captcha_response(config, tokens[1:])
+        except ValueError as exc:
+            gate = str(exc).split(":", 1)[0] or "captcha_command_failed"
+            return _fail(gate, str(exc), command="task.captcha")
     if action == "run":
         if len(tokens) != 2:
             return _fail("usage", "usage: /relay task run <run_id>", command="task.run")
@@ -201,6 +209,144 @@ def _task_protection_response(config: RelayConfig, tokens: list[str]) -> RelayAd
         update_manifest(run_dir, lambda manifest: manifest.__setitem__("init_scripts", list_init_scripts(run_dir)))
         return _ok("task.protection.observer-enable", {"status": "installed", "run_id": run_dir.name, "observer": observer})
     return _fail("usage", usage, command="task.protection")
+
+
+def _task_captcha_response(config: RelayConfig, tokens: list[str]) -> RelayAdapterResult:
+    usage = "usage: /relay task captcha <run_id> <inspect|wait|resume|capture|act|show>"
+    if len(tokens) < 2:
+        return _fail("usage", usage, command="task.captcha")
+    run_dir = resolve_run(config, tokens[0])
+    action = tokens[1]
+    if action == "capture" and len(tokens) == 2:
+        visual = capture_captcha_visual(config, run_dir)
+        return _ok(
+            "task.captcha.capture",
+            {
+                "status": visual["status"],
+                "run_id": run_dir.name,
+                "captcha_visual": {
+                    "status": visual["status"],
+                    "width": visual["width"],
+                    "height": visual["height"],
+                    "point_space": visual["point_space"],
+                    "cycle": visual["cycle"],
+                    "artifact_policy": visual["artifact_policy"],
+                },
+            },
+        )
+    if action == "act":
+        raw_points: list[str] = []
+        confidence: float | None = None
+        index = 2
+        while index < len(tokens):
+            if index + 1 >= len(tokens):
+                return _fail("usage", usage, command="task.captcha")
+            flag, value = tokens[index], tokens[index + 1]
+            if flag == "--point":
+                raw_points.append(value)
+            elif flag == "--confidence":
+                try:
+                    confidence = float(value)
+                except ValueError:
+                    return _fail("usage", "--confidence must be numeric", command="task.captcha")
+            else:
+                return _fail("usage", usage, command="task.captcha")
+            index += 2
+        if confidence is None:
+            return _fail("usage", "--confidence is required", command="task.captcha")
+        try:
+            points = parse_visual_points(raw_points)
+        except ValueError as exc:
+            return _fail("usage", str(exc), command="task.captcha")
+        captcha = apply_captcha_visual_actions(config, run_dir, points, confidence=confidence)
+        summary = captcha_summary(run_dir)
+        summary["action_count"] = captcha.get("action_count", len(points))
+        summary["visual_cycle"] = captcha.get("visual_cycle")
+        summary["confidence"] = captcha.get("confidence")
+        return RelayAdapterResult(
+            0 if summary["status"] == "cleared" else 1,
+            {
+                "schema": SCHEMA,
+                "command": "task.captcha.act",
+                "status": summary["status"],
+                "run_id": run_dir.name,
+                "captcha": summary,
+            },
+        )
+    if action == "show" and len(tokens) == 2:
+        captcha = captcha_summary(run_dir)
+        return _ok("task.captcha.show", {"status": captcha["status"], "run_id": run_dir.name, "captcha": captcha})
+    if action == "inspect" and len(tokens) in {2, 4}:
+        page_index = -1
+        if len(tokens) == 4:
+            if tokens[2] != "--page-index":
+                return _fail("usage", usage, command="task.captcha")
+            try:
+                page_index = int(tokens[3])
+            except ValueError:
+                return _fail("usage", "--page-index must be an integer", command="task.captcha")
+        inspect_captcha_gate(config, run_dir, page_index=page_index)
+        summary = captcha_summary(run_dir)
+        return RelayAdapterResult(
+            1 if summary["status"] == "stale" else 0,
+            {
+                "schema": SCHEMA,
+                "command": "task.captcha.inspect",
+                "status": summary["status"],
+                "run_id": run_dir.name,
+                "captcha": summary,
+            },
+        )
+    if action in {"wait", "resume"}:
+        timeout = 120.0 if action == "wait" else 30.0
+        poll_interval = 2.0
+        page_index = -1
+        index = 2
+        while index < len(tokens):
+            if index + 1 >= len(tokens):
+                return _fail("usage", usage, command="task.captcha")
+            flag, value = tokens[index], tokens[index + 1]
+            if flag == "--timeout":
+                try:
+                    timeout = float(value)
+                except ValueError:
+                    return _fail("usage", "--timeout must be numeric", command="task.captcha")
+            elif flag == "--poll-interval":
+                try:
+                    poll_interval = float(value)
+                except ValueError:
+                    return _fail("usage", "--poll-interval must be numeric", command="task.captcha")
+            elif flag == "--page-index":
+                try:
+                    page_index = int(value)
+                except ValueError:
+                    return _fail("usage", "--page-index must be an integer", command="task.captcha")
+            else:
+                return _fail("usage", usage, command="task.captcha")
+            index += 2
+        captcha = wait_for_captcha_clearance(
+            config,
+            run_dir,
+            timeout=timeout,
+            poll_interval=poll_interval,
+            page_index=page_index,
+        )
+        summary = captcha_summary(run_dir)
+        if isinstance(captcha.get("checks"), int):
+            summary["checks"] = captcha["checks"]
+        if isinstance(captcha.get("elapsed_seconds"), (int, float)):
+            summary["elapsed_seconds"] = captcha["elapsed_seconds"]
+        return RelayAdapterResult(
+            0 if summary["status"] == "cleared" else 1,
+            {
+                "schema": SCHEMA,
+                "command": f"task.captcha.{action}",
+                "status": summary["status"],
+                "run_id": run_dir.name,
+                "captcha": summary,
+            },
+        )
+    return _fail("usage", usage, command="task.captcha")
 
 
 def _task_loop_response(config: RelayConfig, tokens: list[str]) -> RelayAdapterResult:
@@ -306,4 +452,7 @@ def format_evidence_lines(evidence: dict[str, Any]) -> list[str]:
         f"protection_confidence: {evidence['protection']['confidence']}",
         f"protection_blocker: {evidence['protection']['blocker_class']}",
         f"protection_next_test: {evidence['protection']['next_test']}",
+        f"captcha: {evidence['captcha']['status']}",
+        f"captcha_provider: {evidence['captcha']['provider'] or 'none'}",
+        f"captcha_next_action: {evidence['captcha']['next_action']}",
     ]
