@@ -3,6 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"
+export PYTHONPATH="$REPO_DIR${PYTHONPATH:+:$PYTHONPATH}"
 RELAY_BASE_DIR="${CHIP_RELAY_BASE_DIR:-$HOME/.local/share/chip-relay}"
 RELAY_VENV_DIR="${CHIP_RELAY_CLOAK_VENV:-$RELAY_BASE_DIR/cloakbrowser-venv}"
 RELAY_PYTHON="${CHIP_RELAY_PYTHON:-$RELAY_VENV_DIR/bin/python}"

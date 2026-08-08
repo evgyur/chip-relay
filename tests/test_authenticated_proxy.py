@@ -193,6 +193,7 @@ class AuthenticatedProxyUnitTests(unittest.TestCase):
         relay = (
             pathlib.Path(__file__).resolve().parents[1] / "scripts" / "chip-relay"
         ).read_text(encoding="utf-8")
+        self.assertIn('export PYTHONPATH="$REPO_DIR${PYTHONPATH:+:$PYTHONPATH}"', relay)
         self.assertIn('RELAY_PYTHON="${CHIP_RELAY_PYTHON:-', relay)
         self.assertIn('"$RELAY_PYTHON" -m chip_relay.cli', relay)
         self.assertNotIn("    python3 -m chip_relay.cli", relay)
