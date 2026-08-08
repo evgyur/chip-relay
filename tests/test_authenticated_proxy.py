@@ -185,6 +185,12 @@ class _ClosedWebSocket:
 
 
 class AuthenticatedProxyUnitTests(unittest.TestCase):
+    def test_cloakbrowser_installer_includes_proxy_auth_runtime_dependency(self) -> None:
+        installer = (
+            pathlib.Path(__file__).resolve().parents[1] / "scripts" / "install-cloakbrowser.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn("'websocket-client>=1.8,<2'", installer)
+
     def _secret(self, root: pathlib.Path, username: str = "fixture-user", password: str = "fixture-pass") -> pathlib.Path:
         path = root / "proxy-secret.json"
         path.write_text(json.dumps({"username": username, "password": password}), encoding="utf-8")

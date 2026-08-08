@@ -16,7 +16,10 @@ if [ ! -x "$VENV_DIR/bin/python" ]; then
 fi
 
 "$VENV_DIR/bin/python" -m pip install --upgrade pip setuptools wheel
-"$VENV_DIR/bin/python" -m pip install --upgrade "$CLOAK_VERSION" 'playwright>=1.40'
+"$VENV_DIR/bin/python" -m pip install --upgrade \
+  "$CLOAK_VERSION" \
+  'playwright>=1.40' \
+  'websocket-client>=1.8,<2'
 
 cat > "$WRAPPER" <<'SH'
 #!/usr/bin/env bash
