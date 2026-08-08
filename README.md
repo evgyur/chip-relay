@@ -64,8 +64,18 @@ CHIP_RELAY_HOST=127.0.0.1
 CHIP_RELAY_PROFILE_DIR=~/.local/share/chip-relay/profiles/default
 CHIP_RELAY_DISPLAY=:1002
 CHIP_RELAY_HEADLESS=0|1
+CHIP_RELAY_PROXY=http://proxy.example:8080
+CHIP_RELAY_PROXY_SECRET_FILE=/absolute/private/path/proxy-auth.json
 CLOAKBROWSER_FINGERPRINT_PLATFORM=windows|macos
 ```
+
+Authenticated proxy credentials are never accepted inside `CHIP_RELAY_PROXY`, `.env`, argv, or raw username/password environment variables. Put only the credential-free proxy endpoint and the path to an owner-only `0600` JSON file in configuration:
+
+```json
+{"username":"proxy-user","password":"[REDACTED]"}
+```
+
+The task runner opens that file with no-follow and owner/mode/type checks, supplies credentials only to an exact matching CDP proxy-auth challenge, removes the secret-file reference from the child environment, and tears the handler down after the task. Remove `CHIP_RELAY_PROXY_SECRET_FILE` to roll back to the existing unauthenticated proxy path.
 
 ## Commands
 
@@ -247,6 +257,21 @@ with sync_playwright() as p:
     print(page.title())
     browser.close()
 ```
+
+### Bounded browser-native fetch
+
+Inside `scripts/final.py`, use the run-bound helper after the top-level page is already on the intended origin:
+
+```python
+from chip_relay.playwright_runner import browser_fetch_for_current_run
+
+metadata = browser_fetch_for_current_run(page, "/api/items?limit=10")
+print(metadata.as_public_dict())  # metadata + opaque body handle only
+```
+
+This lane accepts only relative GET/HEAD paths, binds them to the page's exact scheme/host/port, sends the existing browser cookies with `credentials: "include"`, disables redirect following, and caps time, bytes, content type, and concurrency. Redirects, origin changes, unsupported methods/types, timeout, oversize, and ambiguous network outcomes fail closed without retries.
+
+GET bodies are written under the current run as owner-only `0600` private artifacts. Manifests and generic artifact indexes contain only bounded metadata and an opaque `body-…` handle. `read_private_body_artifact(run_dir, handle)` is an explicit local-only read; do not print or send its bytes to chat. HEAD returns metadata without creating a body artifact. This is not a generic URL fetcher, CAPTCHA tool, protected-site bypass, cache, batch system, or alternate browser backend.
 
 ## Systemd watchdog example
 

@@ -4,6 +4,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from .capabilities import ProxyAuthDescriptor, load_proxy_auth_descriptor
+
 
 @dataclass(frozen=True)
 class RelayConfig:
@@ -17,6 +19,7 @@ class RelayConfig:
     profile_dir: Path
     proxy: str | None
     upload_allowed_dirs: str | None
+    proxy_auth: ProxyAuthDescriptor | None = None
 
 
 def _expand(path: str) -> Path:
@@ -32,7 +35,8 @@ def load_config() -> RelayConfig:
     cdp_url = os.environ.get("CHIP_RELAY_CDP_URL", f"http://{host}:{port}")
     profile = os.environ.get("CHIP_RELAY_PROFILE", "default")
     profile_dir = _expand(os.environ.get("CHIP_RELAY_PROFILE_DIR", str(base_dir / "profiles" / profile)))
-    proxy = os.environ.get("CHIP_RELAY_PROXY")
+    proxy_descriptor = load_proxy_auth_descriptor(os.environ)
+    proxy = proxy_descriptor.server if proxy_descriptor is not None else None
     upload_allowed_dirs = os.environ.get("CHIP_RELAY_UPLOAD_ALLOWED_DIRS")
     return RelayConfig(
         base_dir=base_dir,
@@ -45,4 +49,5 @@ def load_config() -> RelayConfig:
         profile_dir=profile_dir,
         proxy=proxy,
         upload_allowed_dirs=upload_allowed_dirs,
+        proxy_auth=proxy_descriptor if proxy_descriptor is not None and proxy_descriptor.authenticated else None,
     )

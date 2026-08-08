@@ -11,7 +11,7 @@ import socket
 import stat
 import sys
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,6 +23,8 @@ SCHEMA = "chip-relay-run-manifest-v1"
 RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 ATTEMPT_ID_PATTERN = re.compile(r"^attempt-(\d{12})$")
 MAX_MANIFEST_BYTES = 1_048_576
+MAX_PRIVATE_BODY_BYTES = 16 * 1_048_576
+PRIVATE_BODY_HANDLE = re.compile(r"^body-([0-9a-f]{32})$")
 KERNEL_LOCK_RETRY_SECONDS = 0.01
 
 
@@ -425,6 +427,135 @@ def update_manifest(run_dir: Path, updater: Callable[[dict[str, Any]], None]) ->
             raise ValueError("manifest_updater_changed_execution_identity")
         _write_manifest_unlocked(run_dir, manifest)
         return manifest
+
+
+def _open_private_body_directory(run_dir: Path, *, create: bool) -> int:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        current_fd = os.open(run_dir, flags)
+    except OSError as exc:
+        raise ValueError("private_body_run_directory") from exc
+    try:
+        root_metadata = os.fstat(current_fd)
+        if not stat.S_ISDIR(root_metadata.st_mode) or root_metadata.st_uid != os.geteuid():
+            raise ValueError("private_body_run_directory")
+        for name in ("artifacts", "private", "browser-fetch"):
+            if create:
+                try:
+                    os.mkdir(name, 0o700, dir_fd=current_fd)
+                except FileExistsError:
+                    pass
+            next_fd: int | None = None
+            try:
+                next_fd = os.open(name, flags, dir_fd=current_fd)
+                metadata = os.fstat(next_fd)
+                if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.geteuid():
+                    raise ValueError("private_body_directory")
+                if create:
+                    os.fchmod(next_fd, 0o700)
+                elif stat.S_IMODE(metadata.st_mode) != 0o700:
+                    raise ValueError("private_body_directory_mode")
+            except Exception:
+                if next_fd is not None:
+                    os.close(next_fd)
+                raise
+            if next_fd is None:
+                raise ValueError("private_body_directory")
+            os.close(current_fd)
+            current_fd = next_fd
+        return current_fd
+    except Exception:
+        os.close(current_fd)
+        raise
+
+
+def _private_body_token(handle: str) -> str:
+    if not isinstance(handle, str):
+        raise ValueError("private_body_handle")
+    match = PRIVATE_BODY_HANDLE.fullmatch(handle)
+    if match is None:
+        raise ValueError("private_body_handle")
+    return match.group(1)
+
+
+def write_private_body_artifact(run_dir: Path, body: bytes) -> str:
+    if not isinstance(body, bytes) or len(body) > MAX_PRIVATE_BODY_BYTES:
+        raise ValueError("private_body_size")
+    load_manifest(run_dir)
+    directory_fd = _open_private_body_directory(run_dir, create=True)
+    token = secrets.token_hex(16)
+    filename = f"{token}.body"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    file_fd: int | None = None
+    try:
+        file_fd = os.open(filename, flags, 0o600, dir_fd=directory_fd)
+        metadata = os.fstat(file_fd)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.geteuid():
+            raise ValueError("private_body_file")
+        os.fchmod(file_fd, 0o600)
+        view = memoryview(body)
+        while view:
+            written = os.write(file_fd, view)
+            if written <= 0:
+                raise OSError("short private body write")
+            view = view[written:]
+        os.fsync(file_fd)
+        os.fsync(directory_fd)
+        return f"body-{token}"
+    except Exception:
+        with suppress(FileNotFoundError):
+            os.unlink(filename, dir_fd=directory_fd)
+        raise
+    finally:
+        if file_fd is not None:
+            os.close(file_fd)
+        os.close(directory_fd)
+
+
+def read_private_body_artifact(run_dir: Path, handle: str) -> bytes:
+    token = _private_body_token(handle)
+    directory_fd = _open_private_body_directory(run_dir, create=False)
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    file_fd: int | None = None
+    try:
+        file_fd = os.open(f"{token}.body", flags, dir_fd=directory_fd)
+        metadata = os.fstat(file_fd)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.geteuid()
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_size > MAX_PRIVATE_BODY_BYTES
+        ):
+            raise ValueError("private_body_file")
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = os.read(file_fd, min(65_536, MAX_PRIVATE_BODY_BYTES + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > MAX_PRIVATE_BODY_BYTES:
+                raise ValueError("private_body_size")
+        return b"".join(chunks)
+    except OSError as exc:
+        raise ValueError("private_body_file") from exc
+    finally:
+        if file_fd is not None:
+            os.close(file_fd)
+        os.close(directory_fd)
+
+
+def remove_private_body_artifact(run_dir: Path, handle: str) -> None:
+    token = _private_body_token(handle)
+    directory_fd = _open_private_body_directory(run_dir, create=False)
+    try:
+        os.unlink(f"{token}.body", dir_fd=directory_fd)
+        os.fsync(directory_fd)
+    except OSError as exc:
+        raise ValueError("private_body_file") from exc
+    finally:
+        os.close(directory_fd)
 
 
 def load_manifest(run_dir: Path) -> dict[str, Any]:

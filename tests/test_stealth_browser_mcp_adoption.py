@@ -15,6 +15,7 @@ SCRIPT = ROOT / "scripts" / "chip-relay"
 sys.path.insert(0, str(ROOT))
 
 from chip_relay.environment import cdp_binding  # noqa: E402
+from chip_relay.capabilities import CapabilityContractError  # noqa: E402
 from chip_relay.network import record_observation, search_observations  # noqa: E402
 from chip_relay.proxy import merge_proxy_server_arg, parse_proxy_config, redact_launch_arg  # noqa: E402
 from chip_relay.uploads import validate_upload_paths  # noqa: E402
@@ -113,18 +114,32 @@ class StealthBrowserMcpAdoptionTests(unittest.TestCase):
             final_text = (run_dir / "scripts" / "final.py").read_text(encoding="utf-8")
             self.assertIn("apply_init_scripts", final_text)
 
-    def test_proxy_doctor_redacts_credentials_and_merge_keeps_single_arg(self) -> None:
-        parsed = parse_proxy_config("http://user:pass@example.com:8080")
+    def test_proxy_doctor_uses_owner_only_secret_reference_and_merge_keeps_single_arg(self) -> None:
+        parsed = parse_proxy_config("http://example.com:8080")
         self.assertEqual(parsed.server, "http://example.com:8080")
+        with self.assertRaises(CapabilityContractError):
+            parse_proxy_config("http://user:pass@example.com:8080")
         args = merge_proxy_server_arg(["--foo", "--proxy-server=http://old:1"], parsed.server)
         self.assertEqual(args.count("--proxy-server=http://example.com:8080"), 1)
         self.assertNotIn("pass", redact_launch_arg("--proxy-server=http://user:pass@example.com:8080"))
         with tempfile.TemporaryDirectory() as tmp:
             base = pathlib.Path(tmp)
-            checked = self.run_relay("doctor", "webwright", base_dir=base, json_mode=True, extra_env={"CHIP_RELAY_PROXY": "http://user:pass@example.com:8080"})
+            secret = base / "proxy-secret.json"
+            secret.write_text('{"username":"user","password":"pass"}', encoding="utf-8")
+            secret.chmod(0o600)
+            checked = self.run_relay(
+                "doctor",
+                "webwright",
+                base_dir=base,
+                json_mode=True,
+                extra_env={
+                    "CHIP_RELAY_PROXY": "http://example.com:8080",
+                    "CHIP_RELAY_PROXY_SECRET_FILE": str(secret),
+                },
+            )
             self.assertEqual(checked.returncode, 0, checked.stderr + checked.stdout)
             self.assertNotIn("pass", checked.stdout)
-            self.assertIn("proxy", json.loads(checked.stdout)["checks"])
+            self.assertTrue(json.loads(checked.stdout)["checks"]["proxy"]["auth"])
 
     def test_proxy_invalid_errors_and_cdp_binding_is_exact_loopback_only(self) -> None:
         self.assertTrue(cdp_binding("http://localhost:18800")["ok"])
@@ -133,21 +148,19 @@ class StealthBrowserMcpAdoptionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             base = pathlib.Path(tmp)
             checked = self.run_relay("doctor", "webwright", base_dir=base, json_mode=True, extra_env={"CHIP_RELAY_PROXY": "http://user@example.com:8080"})
-            self.assertNotEqual(checked.returncode, 0)
-            payload = json.loads(checked.stdout)
-            self.assertEqual(payload["status"], "failed")
-            self.assertFalse(payload["checks"]["proxy"]["ok"])
-            self.assertNotIn("user@example", checked.stdout)
+            self.assertEqual(checked.returncode, 2)
+            self.assertFalse(checked.stdout)
+            self.assertIn("credentials in environment are forbidden", checked.stderr)
+            self.assertNotIn("user@example", checked.stderr)
 
-    def test_shell_doctor_reports_proxy_redacted_without_credentials(self) -> None:
+    def test_shell_doctor_rejects_credential_bearing_proxy_environment(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = pathlib.Path(tmp)
             checked = self.run_relay("doctor", base_dir=base, extra_env={"CHIP_RELAY_PROXY": "http://user:pass@example.com:8080"})
-            self.assertEqual(checked.returncode, 0, checked.stderr + checked.stdout)
-            self.assertIn("proxy:", checked.stdout)
-            self.assertIn("example.com:8080", checked.stdout)
-            self.assertNotIn("user", checked.stdout)
-            self.assertNotIn("pass", checked.stdout)
+            self.assertEqual(checked.returncode, 2)
+            self.assertFalse(checked.stdout)
+            self.assertIn("credentials in environment are forbidden", checked.stderr)
+            self.assertNotIn("example.com", checked.stderr)
 
     def test_cleanup_dry_run_and_execute_are_confined_to_base_dir(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

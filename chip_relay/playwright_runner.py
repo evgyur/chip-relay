@@ -12,10 +12,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .browser_fetch import browser_native_fetch
+from .capabilities import BrowserFetchMetadata, BrowserFetchPolicy, CapabilityContractError
 from .config import RelayConfig
 from .environment import browser_environment
 from .hygiene import redact_text, scan_path
 from .proxy import ProxyConfigError, parse_proxy_config, redact_proxy_url
+from .proxy_auth import proxy_auth_session
 from .workspace import (
     begin_execution_attempt,
     execution_marker,
@@ -50,6 +53,22 @@ class RunResult:
         if self.log_tail:
             payload["log_tail"] = self.log_tail
         return payload
+
+
+def browser_fetch_for_current_run(
+    page: Any,
+    path: str,
+    *,
+    method: str = "GET",
+    policy: BrowserFetchPolicy | None = None,
+) -> BrowserFetchMetadata:
+    raw_run_dir = os.environ.get("CHIP_RELAY_RUN_DIR")
+    if not raw_run_dir:
+        raise CapabilityContractError("browser_fetch_run_missing")
+    run_dir = Path(raw_run_dir)
+    if not run_dir.is_absolute():
+        raise CapabilityContractError("browser_fetch_run_invalid")
+    return browser_native_fetch(page, run_dir, path, method=method, policy=policy)
 
 
 def utc_now_text() -> str:
@@ -89,8 +108,14 @@ def _run_final_script_locked(run_dir: Path, *, config: RelayConfig, timeout: int
         return result
 
     env = os.environ.copy()
-    env.setdefault("CHIP_RELAY_CDP_URL", config.cdp_url)
-    env.setdefault("CHIP_RELAY_RUN_DIR", str(run_dir))
+    for secret_key in (
+        "CHIP_RELAY_PROXY_SECRET_FILE",
+        "CHIP_RELAY_PROXY_USERNAME",
+        "CHIP_RELAY_PROXY_PASSWORD",
+    ):
+        env.pop(secret_key, None)
+    env["CHIP_RELAY_CDP_URL"] = config.cdp_url
+    env["CHIP_RELAY_RUN_DIR"] = str(run_dir)
     env["CHIP_RELAY_ATTEMPT_ID"] = str(execution_marker(manifest)["attempt_id"])
     package_root = str(Path(__file__).resolve().parents[1])
     inherited_pythonpath = env.get("PYTHONPATH")
@@ -100,20 +125,36 @@ def _run_final_script_locked(run_dir: Path, *, config: RelayConfig, timeout: int
     env.setdefault("PYTHONUNBUFFERED", "1")
 
     try:
-        proc = subprocess.run(
-            [sys.executable, str(final_script)],
-            cwd=run_dir,
-            env=env,
-            text=True,
-            capture_output=True,
-            timeout=timeout,
-        )
+        with proxy_auth_session(config.cdp_url, config.proxy_auth):
+            proc = subprocess.run(
+                [sys.executable, str(final_script)],
+                cwd=run_dir,
+                env=env,
+                text=True,
+                capture_output=True,
+                timeout=timeout,
+            )
     except subprocess.TimeoutExpired as exc:
         stdout = exc.stdout if type(exc.stdout) is str else ""
         stderr = exc.stderr if type(exc.stderr) is str else ""
         combined = stdout + stderr
         log_path.write_text(redact_text(combined), encoding="utf-8")
         result = RunResult("failed", manifest.get("run_id", run_dir.name), run_dir, 124, log_path, config.cdp_url, "final_script_timeout", redact_text(combined))
+        _update_run_manifest(run_dir, manifest, result)
+        return result
+    except CapabilityContractError as exc:
+        combined = f"proxy_auth_failed:{exc}\n"
+        log_path.write_text(redact_text(combined), encoding="utf-8")
+        result = RunResult(
+            "failed",
+            manifest.get("run_id", run_dir.name),
+            run_dir,
+            78,
+            log_path,
+            config.cdp_url,
+            "proxy_auth_failed",
+            redact_text(combined),
+        )
         _update_run_manifest(run_dir, manifest, result)
         return result
     combined = (proc.stdout or "") + (proc.stderr or "")
@@ -174,8 +215,10 @@ def doctor_webwright(config: RelayConfig) -> dict[str, Any]:
                 "configured": True,
                 "server": parsed_proxy.server,
                 "redacted": redact_proxy_url(config.proxy),
-                "auth": parsed_proxy.username is not None,
+                "auth": config.proxy_auth is not None,
             }
+            if config.proxy_auth is not None and importlib.util.find_spec("websocket") is None:
+                proxy_check.update({"ok": False, "failed_gate": "websocket_client_missing"})
         except ProxyConfigError as exc:
             proxy_check = {"ok": False, "configured": True, "failed_gate": str(exc), "redacted": "[REDACTED]"}
 

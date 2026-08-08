@@ -3,11 +3,27 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"
+
+validate_proxy_environment() {
+  PYTHONPATH="$REPO_DIR${PYTHONPATH:+:$PYTHONPATH}" python3 -c \
+    'import os; from chip_relay.capabilities import reject_credential_environment; reject_credential_environment(os.environ)' \
+    >/dev/null 2>&1
+}
+
 if [ -f "$REPO_DIR/.env" ]; then
+  if ! (set -a; . "$REPO_DIR/.env"; set +a; validate_proxy_environment); then
+    echo "[error] proxy credentials in environment are forbidden; use CHIP_RELAY_PROXY_SECRET_FILE" >&2
+    exit 2
+  fi
   set -a
   # shellcheck disable=SC1091
   . "$REPO_DIR/.env"
   set +a
+fi
+
+if ! validate_proxy_environment; then
+  echo "[error] proxy credentials in environment are forbidden; use CHIP_RELAY_PROXY_SECRET_FILE" >&2
+  exit 2
 fi
 
 BASE_DIR="${CHIP_RELAY_BASE_DIR:-$HOME/.local/share/chip-relay}"

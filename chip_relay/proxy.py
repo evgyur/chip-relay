@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from typing import Optional
 from urllib.parse import urlsplit, urlunsplit
 
+from .capabilities import CapabilityContractError
+
 
 class ProxyConfigError(ValueError):
     pass
@@ -35,10 +37,10 @@ def parse_proxy_config(proxy_url: str) -> ProxyConfig:
         raise ProxyConfigError("proxy_url_missing_hostname")
     if parsed.port is None:
         raise ProxyConfigError("proxy_url_missing_port")
-    if parsed.username is not None and parsed.password is None:
-        raise ProxyConfigError("proxy_url_username_requires_password")
-    if parsed.password is not None and parsed.username is None:
-        raise ProxyConfigError("proxy_url_password_requires_username")
+    if parsed.username is not None or parsed.password is not None:
+        raise CapabilityContractError("proxy_credentials_in_environment")
+    if parsed.scheme not in {"http", "https"} or parsed.path or parsed.query or parsed.fragment:
+        raise ProxyConfigError("proxy_url_invalid_components")
     host = _format_host(parsed.hostname)
     server = urlunsplit((parsed.scheme or "http", f"{host}:{parsed.port}", "", "", ""))
     return ProxyConfig(server=server, username=parsed.username, password=parsed.password)
