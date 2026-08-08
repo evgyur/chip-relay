@@ -3,9 +3,15 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"
+RELAY_BASE_DIR="${CHIP_RELAY_BASE_DIR:-$HOME/.local/share/chip-relay}"
+RELAY_VENV_DIR="${CHIP_RELAY_CLOAK_VENV:-$RELAY_BASE_DIR/cloakbrowser-venv}"
+RELAY_PYTHON="${CHIP_RELAY_PYTHON:-$RELAY_VENV_DIR/bin/python}"
+if [ ! -x "$RELAY_PYTHON" ]; then
+  RELAY_PYTHON="$(command -v python3)"
+fi
 
 validate_proxy_environment() {
-  PYTHONPATH="$REPO_DIR${PYTHONPATH:+:$PYTHONPATH}" python3 -c \
+  PYTHONPATH="$REPO_DIR${PYTHONPATH:+:$PYTHONPATH}" "$RELAY_PYTHON" -c \
     'import os; from chip_relay.capabilities import reject_credential_environment; reject_credential_environment(os.environ)' \
     >/dev/null 2>&1
 }
@@ -174,7 +180,7 @@ backend_bin() {
 
 proxy_server() {
   [ -z "$PROXY" ] && return 1
-  PYTHONPATH="$REPO_DIR" python3 - <<'PY'
+  PYTHONPATH="$REPO_DIR" "$RELAY_PYTHON" - <<'PY'
 import os, sys
 from chip_relay.proxy import ProxyConfigError, parse_proxy_config
 try:
@@ -187,7 +193,7 @@ PY
 
 proxy_redacted() {
   [ -z "$PROXY" ] && { echo "not-configured"; return 0; }
-  PYTHONPATH="$REPO_DIR" python3 - <<'PY'
+  PYTHONPATH="$REPO_DIR" "$RELAY_PYTHON" - <<'PY'
 import os
 from chip_relay.proxy import redact_proxy_url
 print(redact_proxy_url(os.environ.get('CHIP_RELAY_PROXY', '')) or 'configured')
@@ -377,17 +383,17 @@ cmd="${1:-status}"
 shift || true
 case "$cmd" in
   task)
-    python3 -m chip_relay.cli $([ "$JSON" -eq 1 ] && printf '%s' --json) task "$@" ;;
+    "$RELAY_PYTHON" -m chip_relay.cli $([ "$JSON" -eq 1 ] && printf '%s' --json) task "$@" ;;
   relay)
-    python3 -m chip_relay.cli $([ "$JSON" -eq 1 ] && printf '%s' --json) relay "$@" ;;
+    "$RELAY_PYTHON" -m chip_relay.cli $([ "$JSON" -eq 1 ] && printf '%s' --json) relay "$@" ;;
   artifacts)
-    python3 -m chip_relay.cli $([ "$JSON" -eq 1 ] && printf '%s' --json) artifacts "$@" ;;
+    "$RELAY_PYTHON" -m chip_relay.cli $([ "$JSON" -eq 1 ] && printf '%s' --json) artifacts "$@" ;;
   recipe)
-    python3 -m chip_relay.cli $([ "$JSON" -eq 1 ] && printf '%s' --json) recipe "$@" ;;
+    "$RELAY_PYTHON" -m chip_relay.cli $([ "$JSON" -eq 1 ] && printf '%s' --json) recipe "$@" ;;
   cleanup)
-    python3 -m chip_relay.cli $([ "$JSON" -eq 1 ] && printf '%s' --json) cleanup "$@" ;;
+    "$RELAY_PYTHON" -m chip_relay.cli $([ "$JSON" -eq 1 ] && printf '%s' --json) cleanup "$@" ;;
   stealth)
-    python3 -m chip_relay.cli $([ "$JSON" -eq 1 ] && printf '%s' --json) stealth "$@" ;;
+    "$RELAY_PYTHON" -m chip_relay.cli $([ "$JSON" -eq 1 ] && printf '%s' --json) stealth "$@" ;;
   launch|start)
     while [ $# -gt 0 ]; do
       case "$1" in
@@ -400,7 +406,7 @@ case "$cmd" in
   status) cmd_status ;;
   doctor)
     if [ $# -gt 0 ]; then
-      python3 -m chip_relay.cli $([ "$JSON" -eq 1 ] && printf '%s' --json) doctor "$@"
+      "$RELAY_PYTHON" -m chip_relay.cli $([ "$JSON" -eq 1 ] && printf '%s' --json) doctor "$@"
     else
       cmd_doctor
     fi ;;
