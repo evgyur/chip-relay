@@ -311,13 +311,13 @@ def _absolute_executable(raw: str, *, configured: bool) -> str:
     if not located_path.is_absolute():
         raise ValueError("browser_use_command_absolute_required")
     try:
-        resolved = located_path.resolve(strict=True)
-        metadata = resolved.stat()
+        absolute = located_path.absolute()
+        metadata = absolute.stat()
     except OSError as exc:
         raise BrowserUseUnavailable("browser_use_cli_missing") from exc
-    if not stat.S_ISREG(metadata.st_mode) or not os.access(resolved, os.X_OK):
+    if not stat.S_ISREG(metadata.st_mode) or not os.access(absolute, os.X_OK):
         raise BrowserUseUnavailable("browser_use_cli_missing")
-    return str(resolved)
+    return str(absolute)
 
 
 def _command(config: RelayConfig) -> tuple[list[str], str]:
@@ -496,7 +496,7 @@ def _close_process_group(group_id: int) -> None:
 
 def _frozen_executable(command: list[str]) -> tuple[list[str], int | None, tuple[int, ...], str | None]:
     try:
-        fd = os.open(command[0], os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0))
+        fd = os.open(command[0], os.O_RDONLY | os.O_CLOEXEC)
     except OSError as exc:
         raise BrowserUseUnavailable("browser_use_cli_identity") from exc
     metadata = os.fstat(fd)
@@ -734,6 +734,20 @@ def _daemon_request(isolation: BrowserUseIsolation, payload: dict[str, Any], *, 
     return response
 
 
+def _process_start_token(pid: int) -> str | None:
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        raw = (Path("/proc") / str(pid) / "stat").read_text(encoding="utf-8")
+        closing = raw.rfind(")")
+        fields = raw[closing + 2 :].split()
+        if closing < 0 or len(fields) <= 19:
+            return None
+        return fields[19]
+    except OSError:
+        return None
+
+
 def _attest_daemon(isolation: BrowserUseIsolation) -> dict[str, Any] | None:
     if not _daemon_endpoint(isolation).exists():
         return None
@@ -748,7 +762,12 @@ def _attest_daemon(isolation: BrowserUseIsolation) -> dict[str, Any] | None:
             raise ValueError("browser_use_daemon_attestation")
     except (OSError, TypeError, ValueError, TimeoutError):
         return None
-    return {"pid": pid, "browser_kind": "cdp", "cdp_probe": "Browser.getVersion"}
+    return {
+        "pid": pid,
+        "process_start": _process_start_token(pid),
+        "browser_kind": "cdp",
+        "cdp_probe": "Browser.getVersion",
+    }
 
 
 def _process_alive(pid: int) -> bool:
@@ -759,35 +778,77 @@ def _process_alive(pid: int) -> bool:
     return True
 
 
+def _same_attested_process(pid: int, start_token: str | None) -> bool:
+    if not _process_alive(pid):
+        return False
+    current = _process_start_token(pid)
+    return start_token is None or current == start_token
+
+
+def _terminate_attested_process(pid: int, start_token: str | None) -> bool:
+    if not _same_attested_process(pid, start_token):
+        return True
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except (ProcessLookupError, OSError, OverflowError):
+        return not _same_attested_process(pid, start_token)
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        if not _same_attested_process(pid, start_token):
+            return True
+        time.sleep(0.05)
+    if not _same_attested_process(pid, start_token):
+        return True
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except (ProcessLookupError, OSError, OverflowError):
+        return not _same_attested_process(pid, start_token)
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        if not _same_attested_process(pid, start_token):
+            return True
+        time.sleep(0.05)
+    return not _same_attested_process(pid, start_token)
+
+
 def _shutdown_daemon(isolation: BrowserUseIsolation, attestation: dict[str, Any] | None) -> bool:
     endpoint = _daemon_endpoint(isolation)
-    if not endpoint.exists():
-        return True
     expected_pid = attestation.get("pid") if isinstance(attestation, dict) else None
-    try:
-        _daemon_request(isolation, {"meta": "shutdown"}, timeout=3.0)
-    except (OSError, TypeError, ValueError, TimeoutError):
-        pass
-    deadline = time.monotonic() + 15
+    start_token = attestation.get("process_start") if isinstance(attestation, dict) else None
+    if endpoint.exists():
+        try:
+            _daemon_request(isolation, {"meta": "shutdown"}, timeout=3.0)
+        except (OSError, TypeError, ValueError, TimeoutError):
+            pass
+    if type(expected_pid) is not int:
+        return not endpoint.exists()
+    deadline = time.monotonic() + 3
     while time.monotonic() < deadline:
-        if not endpoint.exists() and (type(expected_pid) is not int or not _process_alive(expected_pid)):
+        if not endpoint.exists() and not _same_attested_process(expected_pid, start_token):
             return True
+        if not endpoint.exists():
+            break
         time.sleep(0.1)
-    if type(expected_pid) is int:
+    if endpoint.exists():
         try:
             current = _daemon_request(isolation, {"meta": "ping"}, timeout=1.0)
         except (OSError, TypeError, ValueError, TimeoutError):
             current = None
-        if isinstance(current, dict) and current.get("pong") is True and current.get("pid") == expected_pid:
-            try:
-                os.kill(expected_pid, signal.SIGTERM)
-            except (ProcessLookupError, OSError, OverflowError):
-                pass
-            for _ in range(20):
-                if not _process_alive(expected_pid):
-                    break
-                time.sleep(0.1)
-    return not endpoint.exists() and (type(expected_pid) is not int or not _process_alive(expected_pid))
+        if not (isinstance(current, dict) and current.get("pong") is True and current.get("pid") == expected_pid):
+            return False
+    terminated = _terminate_attested_process(expected_pid, start_token)
+    return terminated and not endpoint.exists()
+
+
+def _invalidate_result(run_dir: Path) -> None:
+    path = run_dir / "results" / "browser-use" / "last.json"
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.geteuid():
+        raise ValueError("browser_use_metadata")
+    path.unlink()
 
 
 def execute_browser_use(
@@ -806,9 +867,11 @@ def execute_browser_use(
     command, runner = _command(config)
     started = time.monotonic()
     with execution_run_lock(run_dir):
+        _invalidate_result(run_dir)
         isolation = _create_isolation(run_dir)
         env = _minimal_env(config, isolation)
         daemon_closed = False
+        isolation_cleaned = False
         attestation: dict[str, Any] | None = None
         try:
             return_code, stdout, stderr, failure = _run_cli(
@@ -833,6 +896,9 @@ def execute_browser_use(
             daemon_closed = _shutdown_daemon(isolation, attestation)
             if not daemon_closed:
                 failure = "browser_use_daemon_cleanup_failed"
+            else:
+                _cleanup_isolation(isolation)
+                isolation_cleaned = True
             status = "succeeded" if return_code == 0 and failure is None else "failed"
             cdp_status = "isolated-daemon-cdp" if attestation is not None else "configured-command-unattested"
             result = {
@@ -866,7 +932,7 @@ def execute_browser_use(
             if not daemon_closed:
                 recovery_attestation = attestation or _attest_daemon(isolation)
                 daemon_closed = _shutdown_daemon(isolation, recovery_attestation)
-            if daemon_closed:
+            if daemon_closed and not isolation_cleaned:
                 _cleanup_isolation(isolation)
 
 
@@ -964,6 +1030,51 @@ def _load_result(path: Path, *, run_dir: Path) -> dict[str, Any] | None:
     if payload["cdp"] == "isolated-daemon-cdp" and payload["daemon"].get("status") != "attested-and-closed":
         raise ValueError("browser_use_metadata")
     if payload.get("runner") == "browser-use" and payload.get("status") == "succeeded" and payload["cdp"] != "isolated-daemon-cdp":
+        raise ValueError("browser_use_metadata")
+    if (
+        payload.get("runner") not in {"browser-use", "configured"}
+        or not isinstance(payload.get("policy_sha256"), str)
+        or SHA256_PATTERN.fullmatch(payload["policy_sha256"]) is None
+        or type(payload.get("exit_code")) is not int
+        or not -255 <= payload["exit_code"] <= 255
+        or type(payload.get("duration_ms")) is not int
+        or not 0 <= payload["duration_ms"] <= 700_000
+        or payload.get("artifact_policy") != "private-local/metadata-only-report"
+        or payload.get("trust_boundary") != "cooperative-policy/not-a-sandbox"
+        or payload.get("network_boundary") != "public-https-preflight/no-redirect-enforcement"
+    ):
+        raise ValueError("browser_use_metadata")
+    for stream_name in ("stdout", "stderr"):
+        stream = payload.get(stream_name)
+        if (
+            not isinstance(stream, dict)
+            or type(stream.get("size_bytes")) is not int
+            or not 0 <= stream["size_bytes"] <= MAX_OUTPUT_BYTES
+            or not isinstance(stream.get("sha256"), str)
+            or SHA256_PATTERN.fullmatch(stream["sha256"]) is None
+        ):
+            raise ValueError("browser_use_metadata")
+    known_failures = {
+        "timeout",
+        "output_too_large",
+        "browser_use_cli_exit",
+        "browser_use_daemon_attestation_failed",
+        "browser_use_daemon_cleanup_failed",
+    }
+    if payload["status"] == "succeeded":
+        if payload["exit_code"] != 0 or payload.get("failure") is not None or payload["daemon"].get("status") == "cleanup-failed":
+            raise ValueError("browser_use_metadata")
+    elif payload.get("failure") not in known_failures:
+        raise ValueError("browser_use_metadata")
+    if payload["daemon"].get("status") == "attested-and-closed" and (
+        payload["daemon"].get("browser_kind") != "cdp" or payload["daemon"].get("probe") != "Browser.getVersion"
+    ):
+        raise ValueError("browser_use_metadata")
+    try:
+        finished_at = datetime.fromisoformat(str(payload.get("finished_at", "")).replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("browser_use_metadata") from exc
+    if finished_at.tzinfo is None:
         raise ValueError("browser_use_metadata")
     _validate_stored_screenshot(run_dir, payload.get("screenshot"))
     return payload

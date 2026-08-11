@@ -5,6 +5,7 @@ import io
 import json
 import os
 import pathlib
+import signal
 import subprocess
 import sys
 import tempfile
@@ -215,6 +216,56 @@ print(shot)
             self.assertIn("scripts/browser-use.py", context["editable_files"])
             self.assertIn("browser_use_execute", context["commands"])
 
+    def test_cleanup_failure_never_publishes_success_metadata(self) -> None:
+        from chip_relay.browser_use import browser_use_summary, execute_browser_use
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            fake_cli = root / "ok.py"
+            fake_cli.write_text("import sys\nsys.stdin.read()\nprint('ok')\n", encoding="utf-8")
+            config = self.make_config(root, command=f"{sys.executable} {fake_cli}")
+            run_dir = self.make_run(config)
+
+            with (
+                mock.patch("chip_relay.browser_use._cleanup_isolation", side_effect=OSError("injected")),
+                self.assertRaises((OSError, ValueError)),
+            ):
+                execute_browser_use(config, run_dir, run_dir / "scripts" / "browser-use.py", timeout=10)
+
+            self.assertEqual(browser_use_summary(run_dir)["status"], "not-run")
+
+    @unittest.skipIf(os.name == "nt", "venv layout probe")
+    def test_descriptor_pinning_preserves_virtualenv_identity(self) -> None:
+        from chip_relay.browser_use import execute_browser_use
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            venv = root / "venv"
+            subprocess.run([sys.executable, "-m", "venv", str(venv)], check=True)
+            vpython = venv / "bin" / "python"
+            pyver = subprocess.check_output(
+                [str(vpython), "-c", "import sys; print(f'python{sys.version_info.major}.{sys.version_info.minor}')"],
+                text=True,
+            ).strip()
+            site = venv / "lib" / pyver / "site-packages"
+            (site / "relay_probe_marker.py").write_text("VALUE = 'venv-only'\n", encoding="utf-8")
+            launcher = root / "venv_cli.py"
+            launcher.write_text(
+                "import json,sys\nimport relay_probe_marker\nsys.stdin.read()\n"
+                "print(json.dumps({'prefix': sys.prefix, 'executable': sys.executable, 'marker': relay_probe_marker.VALUE}))\n",
+                encoding="utf-8",
+            )
+            config = self.make_config(root, command=f"{vpython} {launcher}")
+            run_dir = self.make_run(config)
+
+            result = execute_browser_use(config, run_dir, run_dir / "scripts" / "browser-use.py", timeout=10)
+            payload = json.loads((run_dir / "logs" / "browser-use.log").read_text(encoding="utf-8"))
+
+            self.assertEqual(result["status"], "succeeded")
+            self.assertEqual(payload["marker"], "venv-only")
+            self.assertEqual(pathlib.Path(payload["prefix"]), venv)
+            self.assertEqual(pathlib.Path(payload["executable"]), vpython)
+
     def test_output_cap_fails_closed_without_putting_output_in_summary(self) -> None:
         from chip_relay.browser_use import MAX_OUTPUT_BYTES, execute_browser_use
 
@@ -338,6 +389,67 @@ print('ready')
             executions = run_dir / "browser-use" / "executions"
             self.assertFalse(any(executions.iterdir()))
 
+    @unittest.skipIf(os.name == "nt", "Unix daemon race probe")
+    def test_attested_daemon_cannot_unlink_endpoint_and_survive_success(self) -> None:
+        from chip_relay.browser_use import execute_browser_use
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            browser_use = fake_bin / "browser-use"
+            browser_use.write_text(
+                """#!/usr/bin/env python3
+import json, os, pathlib, socket, sys, time
+sys.stdin.read()
+endpoint = pathlib.Path(os.environ['BH_RUNTIME_DIR']) / 'bu.sock'
+pid_file = pathlib.Path(os.environ['BH_AGENT_WORKSPACE']) / 'daemon-pid'
+pid = os.fork()
+if pid == 0:
+    os.setsid()
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(str(endpoint))
+    os.chmod(endpoint, 0o600)
+    server.listen()
+    pid_file.write_text(str(os.getpid()))
+    while True:
+        connection, _ = server.accept()
+        with connection:
+            request = json.loads(connection.makefile('r', encoding='utf-8').readline())
+            if request.get('meta') == 'ping':
+                response = {'pong': True, 'pid': os.getpid(), 'browser_kind': 'cdp'}
+            elif request.get('method') == 'Browser.getVersion':
+                endpoint.unlink()
+                response = {'result': {'product': 'RaceBrowser/1'}}
+            else:
+                response = {'ok': True}
+            connection.sendall((json.dumps(response) + '\\n').encode())
+    os._exit(0)
+deadline = time.monotonic() + 3
+while (not endpoint.exists() or not pid_file.exists()) and time.monotonic() < deadline:
+    time.sleep(0.01)
+print('ready')
+""",
+                encoding="utf-8",
+            )
+            browser_use.chmod(0o700)
+            config = self.make_config(root, command=None)
+            run_dir = self.make_run(config)
+            old_path = os.environ.get("PATH", "")
+            with mock.patch.dict(os.environ, {"PATH": f"{fake_bin}{os.pathsep}{old_path}"}, clear=False):
+                result = execute_browser_use(config, run_dir, run_dir / "scripts" / "browser-use.py", timeout=10)
+            pid = int((run_dir / "browser-use" / "workspace" / "daemon-pid").read_text(encoding="utf-8"))
+            try:
+                os.kill(pid, 0)
+                alive = True
+            except OSError:
+                alive = False
+            if alive:
+                os.kill(pid, signal.SIGKILL)
+
+            self.assertEqual(result["status"], "succeeded")
+            self.assertFalse(alive)
+
     def test_screenshot_requires_capture_call_in_validated_script(self) -> None:
         from chip_relay.browser_use import execute_browser_use
 
@@ -455,6 +567,39 @@ print({str(outside)!r})
                             "sha256": "0" * 64,
                             "media_type": "image/png",
                         },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            metadata.chmod(0o600)
+            self.assertEqual(browser_use_summary(run_dir)["status"], "invalid")
+
+    def test_summary_rejects_cross_field_success_forgery(self) -> None:
+        from chip_relay.browser_use import browser_use_summary
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            config = self.make_config(root, command=sys.executable)
+            run_dir = self.make_run(config)
+            metadata = run_dir / "results" / "browser-use" / "last.json"
+            metadata.parent.mkdir(parents=True)
+            metadata.write_text(
+                json.dumps(
+                    {
+                        "schema": "chip-relay-browser-use-result-v1",
+                        "status": "succeeded",
+                        "mode": "cooperative-read-only",
+                        "cdp": "isolated-daemon-cdp",
+                        "runner": "browser-use",
+                        "script_sha256": "0" * 64,
+                        "policy_sha256": "0" * 64,
+                        "exit_code": 99,
+                        "failure": "browser_use_daemon_cleanup_failed",
+                        "stdout": {"size_bytes": 0, "sha256": "0" * 64},
+                        "stderr": {"size_bytes": 0, "sha256": "0" * 64},
+                        "screenshot": None,
+                        "daemon": {"status": "attested-and-closed", "browser_kind": "cdp", "probe": "Browser.getVersion"},
+                        "duration_ms": -1,
                     }
                 ),
                 encoding="utf-8",
