@@ -6,6 +6,7 @@ import ipaddress
 import json
 import os
 import re
+import secrets
 import shlex
 import shutil
 import signal
@@ -13,10 +14,12 @@ import socket
 import stat
 import struct
 import subprocess
+import sys
 import tempfile
 import time
 import zlib
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -47,6 +50,16 @@ Resolver = Callable[..., Sequence[tuple[Any, ...]]]
 
 class BrowserUseUnavailable(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class BrowserUseIsolation:
+    execution_root: Path
+    runtime_dir: Path
+    tmp_dir: Path
+    workspace_dir: Path
+    config_dir: Path
+    name: str
 
 
 def _utc_now_text() -> str:
@@ -216,11 +229,17 @@ def validate_read_only_script(source: str, *, resolver: Resolver = socket.getadd
         raise ValueError("browser_use_script_policy")
     if not tree.body:
         raise ValueError("browser_use_script")
+    captures = sum(
+        1
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "capture_screenshot"
+    )
     return {
         "schema": "chip-relay-browser-use-policy-v1",
         "mode": MODE,
         "helpers": sorted(READ_HELPERS),
         "navigations": navigations,
+        "captures": captures,
         "script_sha256": _sha256(encoded),
         "network_boundary": "preflight-only/no-redirect-enforcement",
         "trust_boundary": "cooperative-policy/not-a-sandbox",
@@ -279,6 +298,28 @@ def _read_script(run_dir: Path, script_path: Path) -> tuple[str, str]:
     return source, _sha256(bytes(data))
 
 
+def _absolute_executable(raw: str, *, configured: bool) -> str:
+    expanded = os.path.expanduser(raw)
+    contains_separator = os.sep in expanded or bool(os.altsep and os.altsep in expanded)
+    candidate = Path(expanded)
+    if configured and contains_separator and not candidate.is_absolute():
+        raise ValueError("browser_use_command_absolute_required")
+    located = shutil.which(expanded) if not contains_separator else expanded
+    if not located:
+        raise BrowserUseUnavailable("browser_use_cli_missing")
+    located_path = Path(located)
+    if not located_path.is_absolute():
+        raise ValueError("browser_use_command_absolute_required")
+    try:
+        resolved = located_path.resolve(strict=True)
+        metadata = resolved.stat()
+    except OSError as exc:
+        raise BrowserUseUnavailable("browser_use_cli_missing") from exc
+    if not stat.S_ISREG(metadata.st_mode) or not os.access(resolved, os.X_OK):
+        raise BrowserUseUnavailable("browser_use_cli_missing")
+    return str(resolved)
+
+
 def _command(config: RelayConfig) -> tuple[list[str], str]:
     if config.browser_use_command:
         try:
@@ -287,14 +328,14 @@ def _command(config: RelayConfig) -> tuple[list[str], str]:
             raise ValueError("browser_use_command") from exc
         if not parts:
             raise ValueError("browser_use_command")
-        executable = shutil.which(parts[0]) if os.sep not in parts[0] else parts[0]
-        if not executable or not os.path.isfile(executable) or not os.access(executable, os.X_OK):
-            raise BrowserUseUnavailable("browser_use_cli_missing")
-        parts[0] = executable
+        parts[0] = _absolute_executable(parts[0], configured=True)
+        for argument in parts[1:]:
+            if (os.sep in argument or bool(os.altsep and os.altsep in argument)) and not argument.startswith("-") and not Path(argument).is_absolute():
+                raise ValueError("browser_use_command_absolute_required")
         return parts, "configured"
     direct = shutil.which("browser-use")
     if direct:
-        return [direct], "browser-use"
+        return [_absolute_executable(direct, configured=False)], "browser-use"
     raise BrowserUseUnavailable("browser_use_cli_missing")
 
 
@@ -314,7 +355,7 @@ def browser_use_doctor(config: RelayConfig) -> dict[str, Any]:
         "status": "ready" if not errors else "blocked",
         "mode": MODE,
         "runner": runner,
-        "cdp": "loopback-relay" if not any("cdp" in error for error in errors) else "blocked",
+        "cdp": "configured-loopback/not-yet-attested" if not any("cdp" in error for error in errors) else "blocked",
         "errors": errors,
         "allowed_helpers": sorted(READ_HELPERS),
         "trust_boundary": "cooperative-policy/not-a-sandbox",
@@ -338,7 +379,7 @@ def browser_use_plan(
         "schema": "chip-relay-browser-use-plan-v1",
         "status": "ready" if doctor["status"] == "ready" else "blocked",
         "mode": MODE,
-        "cdp": "loopback-relay",
+        "cdp": "configured-loopback/not-yet-attested",
         "script_sha256": script_sha256,
         "policy": policy,
         "runner": doctor["runner"],
@@ -386,8 +427,33 @@ def _atomic_write(path: Path, data: bytes) -> None:
         os.close(dir_fd)
 
 
-def _minimal_env(config: RelayConfig, run_dir: Path) -> dict[str, str]:
-    workspace = _private_directory(run_dir / "browser-use" / "workspace")
+def _create_isolation(run_dir: Path) -> BrowserUseIsolation:
+    token = secrets.token_hex(8)
+    execution_root = _private_directory(run_dir / "browser-use" / "executions" / token)
+    runtime_dir = Path(tempfile.mkdtemp(prefix=f"crbu-{token[:6]}-"))
+    runtime_dir.chmod(0o700)
+    tmp_dir = _private_directory(execution_root / "tmp")
+    workspace_dir = _private_directory(run_dir / "browser-use" / "workspace")
+    config_dir = _private_directory(execution_root / "config")
+    return BrowserUseIsolation(
+        execution_root=execution_root,
+        runtime_dir=runtime_dir,
+        tmp_dir=tmp_dir,
+        workspace_dir=workspace_dir,
+        config_dir=config_dir,
+        name=f"relay-{token}",
+    )
+
+
+def _cleanup_isolation(isolation: BrowserUseIsolation) -> None:
+    for path in (isolation.runtime_dir, isolation.execution_root):
+        try:
+            shutil.rmtree(path)
+        except FileNotFoundError:
+            continue
+
+
+def _minimal_env(config: RelayConfig, isolation: BrowserUseIsolation) -> dict[str, str]:
     env: dict[str, str] = {}
     for key in ("HOME", "LANG", "LC_ALL", "PATH", "TMPDIR"):
         value = os.environ.get(key)
@@ -396,7 +462,11 @@ def _minimal_env(config: RelayConfig, run_dir: Path) -> dict[str, str]:
     env.update(
         {
             "BU_CDP_URL": config.cdp_url,
-            "BH_AGENT_WORKSPACE": str(workspace),
+            "BU_NAME": isolation.name,
+            "BH_RUNTIME_DIR": str(isolation.runtime_dir),
+            "BH_TMP_DIR": str(isolation.tmp_dir),
+            "BH_CONFIG_DIR": str(isolation.config_dir),
+            "BH_AGENT_WORKSPACE": str(isolation.workspace_dir),
             "BH_RECORD": "0",
             "NO_COLOR": "1",
         }
@@ -415,6 +485,29 @@ def _terminate_process(proc: subprocess.Popen[bytes]) -> None:
     proc.wait(timeout=5)
 
 
+def _close_process_group(group_id: int) -> None:
+    if os.name != "posix":
+        return
+    try:
+        os.killpg(group_id, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
+def _frozen_executable(command: list[str]) -> tuple[list[str], int | None, tuple[int, ...], str | None]:
+    try:
+        fd = os.open(command[0], os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0))
+    except OSError as exc:
+        raise BrowserUseUnavailable("browser_use_cli_identity") from exc
+    metadata = os.fstat(fd)
+    if not stat.S_ISREG(metadata.st_mode) or not metadata.st_mode & 0o111:
+        os.close(fd)
+        raise BrowserUseUnavailable("browser_use_cli_identity")
+    if sys.platform.startswith("linux") and Path("/proc/self/fd").is_dir():
+        return list(command), fd, (fd,), f"/proc/self/fd/{fd}"
+    return list(command), fd, (), None
+
+
 def _run_cli(
     command: list[str],
     source: str,
@@ -426,9 +519,10 @@ def _run_cli(
     with tempfile.TemporaryFile(mode="w+b") as stdin_file, tempfile.TemporaryFile(mode="w+b") as stdout_file, tempfile.TemporaryFile(mode="w+b") as stderr_file:
         stdin_file.write(source.encode("utf-8"))
         stdin_file.seek(0)
+        launch_command, executable_fd, pass_fds, executable_override = _frozen_executable(command)
         try:
             proc = subprocess.Popen(
-                command,
+                launch_command,
                 cwd=cwd,
                 env=env,
                 stdin=stdin_file,
@@ -436,9 +530,14 @@ def _run_cli(
                 stderr=stderr_file,
                 start_new_session=True,
                 umask=0o077 if os.name == "posix" else -1,
+                pass_fds=pass_fds,
+                executable=executable_override,
             )
         except OSError as exc:
             raise BrowserUseUnavailable("browser_use_cli_start_failed") from exc
+        finally:
+            if executable_fd is not None:
+                os.close(executable_fd)
         deadline = time.monotonic() + timeout
         failure: str | None = None
         while proc.poll() is None:
@@ -451,6 +550,7 @@ def _run_cli(
                 _terminate_process(proc)
                 break
             time.sleep(0.05)
+        _close_process_group(proc.pid)
         return_code = int(proc.returncode if proc.returncode is not None else -1)
         stdout_file.seek(0)
         stderr_file.seek(0)
@@ -509,16 +609,11 @@ def _valid_png(data: bytes) -> bool:
     return False
 
 
-def _capture_screenshot_artifact(run_dir: Path, stdout: bytes, *, started_wall: float) -> dict[str, Any] | None:
-    allowed_roots: set[Path] = set()
-    for root in (
-        run_dir / "browser-use",
-        Path.home() / ".config" / "browser-harness" / "tmp",
-    ):
-        try:
-            allowed_roots.add(root.resolve(strict=True))
-        except OSError:
-            continue
+def _capture_screenshot_artifact(run_dir: Path, stdout: bytes, *, source_root: Path) -> dict[str, Any] | None:
+    try:
+        allowed_root = source_root.resolve(strict=True)
+    except OSError:
+        return None
     candidates: list[Path] = []
     for raw_line in stdout.decode("utf-8", errors="replace").splitlines():
         text = raw_line.strip()
@@ -528,7 +623,7 @@ def _capture_screenshot_artifact(run_dir: Path, stdout: bytes, *, started_wall: 
                 candidates.append(candidate)
     for candidate in reversed(candidates):
         try:
-            if candidate.parent.resolve(strict=True) not in allowed_roots:
+            if candidate.parent.resolve(strict=True) != allowed_root:
                 continue
         except OSError:
             continue
@@ -546,7 +641,6 @@ def _capture_screenshot_artifact(run_dir: Path, stdout: bytes, *, started_wall: 
                 not stat.S_ISREG(source_metadata.st_mode)
                 or source_metadata.st_uid != os.geteuid()
                 or not 8 <= source_metadata.st_size <= MAX_SCREENSHOT_BYTES
-                or source_metadata.st_mtime < started_wall - 5
             ):
                 continue
             data = bytearray()
@@ -591,6 +685,111 @@ def _capture_screenshot_artifact(run_dir: Path, stdout: bytes, *, started_wall: 
     return None
 
 
+def _daemon_endpoint(isolation: BrowserUseIsolation) -> Path:
+    return isolation.runtime_dir / ("bu.port" if os.name == "nt" else "bu.sock")
+
+
+def _daemon_request(isolation: BrowserUseIsolation, payload: dict[str, Any], *, timeout: float = 2.0) -> dict[str, Any]:
+    token: str | None = None
+    endpoint = _daemon_endpoint(isolation)
+    if os.name == "nt":
+        try:
+            port_payload = json.loads(endpoint.read_text(encoding="utf-8"))
+            port = int(port_payload["port"])
+            token = str(port_payload["token"])
+        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+            raise ValueError("browser_use_daemon_attestation") from exc
+        connection = socket.create_connection(("127.0.0.1", port), timeout=timeout)
+    else:
+        try:
+            metadata = endpoint.lstat()
+            if not stat.S_ISSOCK(metadata.st_mode) or metadata.st_uid != os.geteuid() or metadata.st_mode & 0o077:
+                raise ValueError("browser_use_daemon_attestation")
+            connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            connection.settimeout(timeout)
+            connection.connect(str(endpoint))
+        except OSError as exc:
+            raise ValueError("browser_use_daemon_attestation") from exc
+    try:
+        request = dict(payload)
+        if token:
+            request["token"] = token
+        connection.sendall((json.dumps(request, separators=(",", ":")) + "\n").encode("utf-8"))
+        data = bytearray()
+        while not data.endswith(b"\n") and len(data) <= 64 * 1024:
+            chunk = connection.recv(min(16 * 1024, 64 * 1024 + 1 - len(data)))
+            if not chunk:
+                break
+            data.extend(chunk)
+    finally:
+        connection.close()
+    if not data or len(data) > 64 * 1024:
+        raise ValueError("browser_use_daemon_attestation")
+    try:
+        response = json.loads(bytes(data).decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("browser_use_daemon_attestation") from exc
+    if not isinstance(response, dict):
+        raise TypeError("browser_use_daemon_attestation")
+    return response
+
+
+def _attest_daemon(isolation: BrowserUseIsolation) -> dict[str, Any] | None:
+    if not _daemon_endpoint(isolation).exists():
+        return None
+    try:
+        ping = _daemon_request(isolation, {"meta": "ping"})
+        pid = ping.get("pid")
+        if ping.get("pong") is not True or ping.get("browser_kind") != "cdp" or type(pid) is not int or not 0 < pid < (1 << 31):
+            raise ValueError("browser_use_daemon_attestation")
+        version = _daemon_request(isolation, {"method": "Browser.getVersion", "params": {}})
+        product = (version.get("result") or {}).get("product") if isinstance(version.get("result"), dict) else None
+        if not isinstance(product, str) or not product:
+            raise ValueError("browser_use_daemon_attestation")
+    except (OSError, TypeError, ValueError, TimeoutError):
+        return None
+    return {"pid": pid, "browser_kind": "cdp", "cdp_probe": "Browser.getVersion"}
+
+
+def _process_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except (ProcessLookupError, OSError, OverflowError):
+        return False
+    return True
+
+
+def _shutdown_daemon(isolation: BrowserUseIsolation, attestation: dict[str, Any] | None) -> bool:
+    endpoint = _daemon_endpoint(isolation)
+    if not endpoint.exists():
+        return True
+    expected_pid = attestation.get("pid") if isinstance(attestation, dict) else None
+    try:
+        _daemon_request(isolation, {"meta": "shutdown"}, timeout=3.0)
+    except (OSError, TypeError, ValueError, TimeoutError):
+        pass
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        if not endpoint.exists() and (type(expected_pid) is not int or not _process_alive(expected_pid)):
+            return True
+        time.sleep(0.1)
+    if type(expected_pid) is int:
+        try:
+            current = _daemon_request(isolation, {"meta": "ping"}, timeout=1.0)
+        except (OSError, TypeError, ValueError, TimeoutError):
+            current = None
+        if isinstance(current, dict) and current.get("pong") is True and current.get("pid") == expected_pid:
+            try:
+                os.kill(expected_pid, signal.SIGTERM)
+            except (ProcessLookupError, OSError, OverflowError):
+                pass
+            for _ in range(20):
+                if not _process_alive(expected_pid):
+                    break
+                time.sleep(0.1)
+    return not endpoint.exists() and (type(expected_pid) is not int or not _process_alive(expected_pid))
+
+
 def execute_browser_use(
     config: RelayConfig,
     run_dir: Path,
@@ -606,43 +805,69 @@ def execute_browser_use(
     policy = validate_read_only_script(source, resolver=resolver)
     command, runner = _command(config)
     started = time.monotonic()
-    started_wall = time.time()
     with execution_run_lock(run_dir):
-        return_code, stdout, stderr, failure = _run_cli(
-            command,
-            source,
-            env=_minimal_env(config, run_dir),
-            cwd=run_dir,
-            timeout=float(timeout),
-        )
-        stdout_text = redact_text(stdout.decode("utf-8", errors="replace"))
-        stderr_text = redact_text(stderr.decode("utf-8", errors="replace"))
-        _atomic_write(run_dir / "logs" / "browser-use.log", stdout_text.encode("utf-8"))
-        _atomic_write(run_dir / "logs" / "browser-use.stderr.log", stderr_text.encode("utf-8"))
-        screenshot = _capture_screenshot_artifact(run_dir, stdout, started_wall=started_wall)
-        status = "succeeded" if return_code == 0 and failure is None else "failed"
-        result = {
-            "schema": SCHEMA,
-            "status": status,
-            "mode": MODE,
-            "cdp": "loopback-relay",
-            "runner": runner,
-            "script_sha256": script_sha256,
-            "policy_sha256": _sha256(json.dumps(policy, sort_keys=True, separators=(",", ":")).encode("utf-8")),
-            "exit_code": return_code,
-            "failure": failure or (None if return_code == 0 else "browser_use_cli_exit"),
-            "stdout": {"size_bytes": len(stdout), "sha256": _sha256(stdout)},
-            "stderr": {"size_bytes": len(stderr), "sha256": _sha256(stderr)},
-            "screenshot": screenshot,
-            "duration_ms": int((time.monotonic() - started) * 1000),
-            "finished_at": _utc_now_text(),
-            "artifact_policy": "private-local/metadata-only-report",
-            "trust_boundary": "cooperative-policy/not-a-sandbox",
-            "network_boundary": "public-https-preflight/no-redirect-enforcement",
-        }
-        encoded = (json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
-        _atomic_write(run_dir / "results" / "browser-use" / "last.json", encoded)
-        return result
+        isolation = _create_isolation(run_dir)
+        env = _minimal_env(config, isolation)
+        daemon_closed = False
+        attestation: dict[str, Any] | None = None
+        try:
+            return_code, stdout, stderr, failure = _run_cli(
+                command,
+                source,
+                env=env,
+                cwd=run_dir,
+                timeout=float(timeout),
+            )
+            stdout_text = redact_text(stdout.decode("utf-8", errors="replace"))
+            stderr_text = redact_text(stderr.decode("utf-8", errors="replace"))
+            _atomic_write(run_dir / "logs" / "browser-use.log", stdout_text.encode("utf-8"))
+            _atomic_write(run_dir / "logs" / "browser-use.stderr.log", stderr_text.encode("utf-8"))
+            screenshot = (
+                _capture_screenshot_artifact(run_dir, stdout, source_root=isolation.tmp_dir)
+                if policy["captures"] > 0
+                else None
+            )
+            attestation = _attest_daemon(isolation)
+            if runner == "browser-use" and return_code == 0 and failure is None and attestation is None:
+                failure = "browser_use_daemon_attestation_failed"
+            daemon_closed = _shutdown_daemon(isolation, attestation)
+            if not daemon_closed:
+                failure = "browser_use_daemon_cleanup_failed"
+            status = "succeeded" if return_code == 0 and failure is None else "failed"
+            cdp_status = "isolated-daemon-cdp" if attestation is not None else "configured-command-unattested"
+            result = {
+                "schema": SCHEMA,
+                "status": status,
+                "mode": MODE,
+                "cdp": cdp_status,
+                "runner": runner,
+                "script_sha256": script_sha256,
+                "policy_sha256": _sha256(json.dumps(policy, sort_keys=True, separators=(",", ":")).encode("utf-8")),
+                "exit_code": return_code,
+                "failure": failure or (None if return_code == 0 else "browser_use_cli_exit"),
+                "stdout": {"size_bytes": len(stdout), "sha256": _sha256(stdout)},
+                "stderr": {"size_bytes": len(stderr), "sha256": _sha256(stderr)},
+                "screenshot": screenshot,
+                "daemon": (
+                    {"status": "attested-and-closed", "browser_kind": "cdp", "probe": "Browser.getVersion"}
+                    if attestation is not None and daemon_closed
+                    else {"status": "not-attested" if daemon_closed else "cleanup-failed"}
+                ),
+                "duration_ms": int((time.monotonic() - started) * 1000),
+                "finished_at": _utc_now_text(),
+                "artifact_policy": "private-local/metadata-only-report",
+                "trust_boundary": "cooperative-policy/not-a-sandbox",
+                "network_boundary": "public-https-preflight/no-redirect-enforcement",
+            }
+            encoded = (json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
+            _atomic_write(run_dir / "results" / "browser-use" / "last.json", encoded)
+            return result
+        finally:
+            if not daemon_closed:
+                recovery_attestation = attestation or _attest_daemon(isolation)
+                daemon_closed = _shutdown_daemon(isolation, recovery_attestation)
+            if daemon_closed:
+                _cleanup_isolation(isolation)
 
 
 def _validate_stored_screenshot(run_dir: Path, payload: Any) -> None:
@@ -731,7 +956,14 @@ def _load_result(path: Path, *, run_dir: Path) -> dict[str, Any] | None:
         or payload.get("mode") != MODE
         or not isinstance(payload.get("script_sha256"), str)
         or SHA256_PATTERN.fullmatch(payload["script_sha256"]) is None
+        or payload.get("cdp") not in {"isolated-daemon-cdp", "configured-command-unattested"}
+        or not isinstance(payload.get("daemon"), dict)
+        or payload["daemon"].get("status") not in {"attested-and-closed", "not-attested", "cleanup-failed"}
     ):
+        raise ValueError("browser_use_metadata")
+    if payload["cdp"] == "isolated-daemon-cdp" and payload["daemon"].get("status") != "attested-and-closed":
+        raise ValueError("browser_use_metadata")
+    if payload.get("runner") == "browser-use" and payload.get("status") == "succeeded" and payload["cdp"] != "isolated-daemon-cdp":
         raise ValueError("browser_use_metadata")
     _validate_stored_screenshot(run_dir, payload.get("screenshot"))
     return payload
@@ -766,6 +998,7 @@ def browser_use_summary(run_dir: Path) -> dict[str, Any]:
         "failure": payload.get("failure"),
         "duration_ms": payload.get("duration_ms"),
         "screenshot": payload.get("screenshot"),
+        "daemon": payload.get("daemon"),
         "trust_boundary": "cooperative-policy/not-a-sandbox",
         "network_boundary": "public-https-preflight/no-redirect-enforcement",
         "artifact_policy": "private-local/metadata-only-report",

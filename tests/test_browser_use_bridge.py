@@ -52,6 +52,21 @@ class BrowserUseBridgeTests(unittest.TestCase):
             self.assertEqual(payload["status"], "blocked")
             self.assertIn("browser_use_cli_missing", payload["errors"])
 
+    def test_doctor_rejects_relative_configured_executable(self) -> None:
+        from chip_relay.browser_use import browser_use_doctor
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            executable = root / "bin" / "browser-use"
+            executable.parent.mkdir()
+            executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            executable.chmod(0o700)
+            config = self.make_config(root, command="bin/browser-use")
+            with contextlib.chdir(root):
+                payload = browser_use_doctor(config)
+            self.assertEqual(payload["status"], "blocked")
+            self.assertIn("browser_use_command_absolute_required", payload["errors"])
+
     def test_new_run_contains_safe_browser_use_script_template(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
@@ -122,7 +137,7 @@ capture_screenshot()
             fake_cli.write_text(
                 """import json, os, struct, sys, zlib
 source = sys.stdin.read()
-shot = os.path.join(os.environ['BH_AGENT_WORKSPACE'], '..', 'source-shot.png')
+shot = os.path.join(os.environ['BH_TMP_DIR'], 'source-shot.png')
 def chunk(kind, data):
     return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind + data) & 0xffffffff)
 png = bytes.fromhex('89504e470d0a1a0a')
@@ -134,6 +149,9 @@ with open(shot, 'wb') as handle:
 print(json.dumps({
     'cdp': os.environ.get('BU_CDP_URL'),
     'workspace': os.environ.get('BH_AGENT_WORKSPACE'),
+    'runtime': os.environ.get('BH_RUNTIME_DIR'),
+    'tmp': os.environ.get('BH_TMP_DIR'),
+    'name': os.environ.get('BU_NAME'),
     'secret_present': 'RELAY_TEST_SECRET' in os.environ,
     'umask': oct(os.umask(0)),
     'source_sha': __import__('hashlib').sha256(source.encode()).hexdigest(),
@@ -149,7 +167,9 @@ print(shot)
             script.write_text(
                 "new_tab('https://example.com')\n"
                 "info = page_info()\n"
-                "print(info)\n",
+                "print(info)\n"
+                "shot = capture_screenshot()\n"
+                "print(shot)\n",
                 encoding="utf-8",
             )
 
@@ -166,7 +186,7 @@ print(shot)
 
             self.assertEqual(result["status"], "succeeded")
             self.assertEqual(result["mode"], "cooperative-read-only")
-            self.assertEqual(result["cdp"], "loopback-relay")
+            self.assertEqual(result["cdp"], "configured-command-unattested")
             self.assertEqual(result["exit_code"], 0)
             self.assertEqual(len(result["script_sha256"]), 64)
             serialized = json.dumps(result, sort_keys=True)
@@ -177,6 +197,9 @@ print(shot)
             log_payload = json.loads((run_dir / "logs" / "browser-use.log").read_text(encoding="utf-8").splitlines()[0])
             self.assertEqual(log_payload["cdp"], config.cdp_url)
             self.assertTrue(pathlib.Path(log_payload["workspace"]).is_relative_to(run_dir))
+            self.assertTrue(pathlib.Path(log_payload["tmp"]).is_relative_to(run_dir))
+            self.assertTrue(pathlib.Path(log_payload["runtime"]).is_absolute())
+            self.assertTrue(log_payload["name"].startswith("relay-"))
             self.assertFalse(log_payload["secret_present"])
             self.assertEqual(log_payload["umask"], "0o77")
             self.assertTrue(result["screenshot"]["path"].startswith("screenshots/"))
@@ -234,6 +257,117 @@ print(shot)
             time.sleep(0.8)
             self.assertFalse(marker.exists())
 
+    def test_successful_parent_exit_still_closes_child_process_group(self) -> None:
+        from chip_relay.browser_use import execute_browser_use
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            marker = root / "late-success-child-write"
+            fake_cli = root / "spawn_and_exit.py"
+            child = f"import pathlib,time;time.sleep(0.5);pathlib.Path({str(marker)!r}).write_text('late')"
+            fake_cli.write_text(
+                "import subprocess,sys\n"
+                "sys.stdin.read()\n"
+                f"subprocess.Popen([sys.executable, '-c', {child!r}])\n",
+                encoding="utf-8",
+            )
+            config = self.make_config(root, command=f"{sys.executable} {fake_cli}")
+            run_dir = self.make_run(config)
+            result = execute_browser_use(config, run_dir, run_dir / "scripts" / "browser-use.py", timeout=10)
+            self.assertEqual(result["status"], "succeeded")
+            time.sleep(0.7)
+            self.assertFalse(marker.exists())
+
+    @unittest.skipIf(os.name == "nt", "Unix-socket Browser Harness protocol")
+    def test_isolated_daemon_is_attested_and_closed_before_success(self) -> None:
+        from chip_relay.browser_use import execute_browser_use
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            daemon = root / "fake_daemon.py"
+            daemon.write_text(
+                """import json, os, socket, sys
+path = sys.argv[1]
+server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+server.bind(path)
+os.chmod(path, 0o600)
+server.listen()
+running = True
+while running:
+    connection, _ = server.accept()
+    with connection:
+        request = json.loads(connection.makefile('r', encoding='utf-8').readline())
+        if request.get('meta') == 'ping':
+            response = {'pong': True, 'pid': os.getpid(), 'browser_kind': 'cdp'}
+        elif request.get('meta') == 'shutdown':
+            response = {'ok': True}
+            running = False
+        elif request.get('method') == 'Browser.getVersion':
+            response = {'result': {'product': 'FakeBrowser/1'}}
+        else:
+            response = {'error': {'message': 'unsupported'}}
+        connection.sendall((json.dumps(response) + '\\n').encode())
+server.close()
+os.unlink(path)
+""",
+                encoding="utf-8",
+            )
+            fake_cli = root / "fake_cli.py"
+            fake_cli.write_text(
+                """import os, pathlib, subprocess, sys, time
+sys.stdin.read()
+endpoint = pathlib.Path(os.environ['BH_RUNTIME_DIR']) / 'bu.sock'
+subprocess.Popen([sys.executable, sys.argv[1], str(endpoint)], start_new_session=True)
+deadline = time.monotonic() + 2
+while not endpoint.exists() and time.monotonic() < deadline:
+    time.sleep(0.01)
+print('ready')
+""",
+                encoding="utf-8",
+            )
+            config = self.make_config(root, command=f"{sys.executable} {fake_cli} {daemon}")
+            run_dir = self.make_run(config)
+            script = run_dir / "scripts" / "browser-use.py"
+            script.write_text("print(page_info())\n", encoding="utf-8")
+
+            result = execute_browser_use(config, run_dir, script, timeout=10)
+
+            self.assertEqual(result["status"], "succeeded")
+            self.assertEqual(result["cdp"], "isolated-daemon-cdp")
+            self.assertEqual(result["daemon"]["status"], "attested-and-closed")
+            executions = run_dir / "browser-use" / "executions"
+            self.assertFalse(any(executions.iterdir()))
+
+    def test_screenshot_requires_capture_call_in_validated_script(self) -> None:
+        from chip_relay.browser_use import execute_browser_use
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            fake_cli = root / "print_preexisting.py"
+            fake_cli.write_text(
+                """import os, struct, sys, zlib
+sys.stdin.read()
+def chunk(kind, data):
+    return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind + data) & 0xffffffff)
+png = bytes.fromhex('89504e470d0a1a0a')
+png += chunk(b'IHDR', struct.pack('>IIBBBBB', 1, 1, 8, 6, 0, 0, 0))
+png += chunk(b'IDAT', zlib.compress(b'\\x00\\x00\\x00\\x00\\x00'))
+png += chunk(b'IEND', b'')
+shot = os.path.join(os.environ['BH_AGENT_WORKSPACE'], '..', 'unrelated.png')
+with open(shot, 'wb') as handle:
+    handle.write(png)
+print(shot)
+""",
+                encoding="utf-8",
+            )
+            config = self.make_config(root, command=f"{sys.executable} {fake_cli}")
+            run_dir = self.make_run(config)
+            script = run_dir / "scripts" / "browser-use.py"
+            script.write_text("print(page_info())\n", encoding="utf-8")
+            result = execute_browser_use(config, run_dir, script, timeout=10)
+            self.assertEqual(result["status"], "succeeded")
+            self.assertIsNone(result["screenshot"])
+
     def test_malformed_screenshot_is_not_imported(self) -> None:
         from chip_relay.browser_use import execute_browser_use
 
@@ -243,7 +377,7 @@ print(shot)
             fake_cli.write_text(
                 """import os, sys
 sys.stdin.read()
-shot = os.path.join(os.environ['BH_AGENT_WORKSPACE'], '..', 'bad.png')
+shot = os.path.join(os.environ['BH_TMP_DIR'], 'bad.png')
 with open(shot, 'wb') as handle:
     handle.write(bytes.fromhex('89504e470d0a1a0a') + b'not-a-png')
 print(shot)
