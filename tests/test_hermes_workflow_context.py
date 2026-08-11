@@ -48,7 +48,10 @@ class HermesWorkflowContextTests(unittest.TestCase):
             self.assertEqual(payload["artifact_policy"], "private-local/no-auto-send")
             self.assertEqual(payload["commands"]["verify"], f"scripts/chip-relay task verify {run_id}")
             self.assertEqual(payload["commands"]["show"], f"scripts/chip-relay task show {run_id}")
-            self.assertIn("task browser-use", payload["commands"]["browser_use_execute"])
+            self.assertEqual(
+                payload["commands"]["browser_use_execute"],
+                f"scripts/chip-relay task browser-use {run_id} execute --script {base / 'runs' / run_id / 'scripts' / 'browser-use.py'}",
+            )
             self.assertNotIn("agent_command", json.dumps(payload))
             self.assertNotIn("Cookies", json.dumps(payload))
             self.assertNotIn("Local State", json.dumps(payload))

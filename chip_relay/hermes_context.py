@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +35,7 @@ def hermes_task_context(config: RelayConfig, run_dir: Path, *, write: bool = Fal
     verification = _last_verification(manifest)
     evidence = evidence_report(config, run_dir)
     artifact_index = artifacts_report(run_dir)
+    browser_use_script = shlex.quote(str(run_dir / "scripts" / "browser-use.py"))
     payload: dict[str, Any] = {
         "schema": SCHEMA,
         "model": "hermes-agent-uses-relay-tool",
@@ -72,8 +74,8 @@ def hermes_task_context(config: RelayConfig, run_dir: Path, *, write: bool = Fal
             "captcha_capture": f"scripts/chip-relay task captcha {run_id} capture",
             "captcha_act": f"scripts/chip-relay task captcha {run_id} act --confidence <0.85..1.0> --point <x,y>",
             "artifacts": f"scripts/chip-relay task artifacts {run_id}",
-            "browser_use_plan": f"scripts/chip-relay task browser-use {run_id} plan --script <run_dir>/scripts/browser-use.py",
-            "browser_use_execute": f"scripts/chip-relay task browser-use {run_id} execute --script <run_dir>/scripts/browser-use.py",
+            "browser_use_plan": f"scripts/chip-relay task browser-use {run_id} plan --script {browser_use_script}",
+            "browser_use_execute": f"scripts/chip-relay task browser-use {run_id} execute --script {browser_use_script}",
             "browser_use_show": f"scripts/chip-relay task browser-use {run_id} show",
             "pack": f"scripts/chip-relay task pack {run_id} --name <recipe-name>",
         },
