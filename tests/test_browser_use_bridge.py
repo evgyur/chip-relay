@@ -266,6 +266,69 @@ print(shot)
             self.assertEqual(pathlib.Path(payload["prefix"]), venv)
             self.assertEqual(pathlib.Path(payload["executable"]), vpython)
 
+    @unittest.skipIf(os.name != "posix", "POSIX descriptor race probe")
+    def test_descriptor_freeze_rejects_invalid_symlink_retargets_without_blocking(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            fifo = root / "candidate-fifo"
+            os.mkfifo(fifo, 0o700)
+            directory = root / "candidate-directory"
+            directory.mkdir()
+            nonexec = root / "candidate-nonexec"
+            nonexec.write_text("not executable\n", encoding="utf-8")
+            nonexec.chmod(0o600)
+            missing = root / "candidate-missing"
+            project_root = pathlib.Path(__file__).resolve().parents[1]
+
+            for index, target in enumerate((fifo, directory, nonexec, missing)):
+                selected = root / f"selected-{index}"
+                selected.symlink_to(sys.executable)
+                probe = (
+                    "import pathlib\n"
+                    "from chip_relay.browser_use import _frozen_executable, _absolute_executable, BrowserUseUnavailable\n"
+                    f"selected = pathlib.Path({str(selected)!r})\n"
+                    f"target = pathlib.Path({str(target)!r})\n"
+                    "_absolute_executable(str(selected), configured=True)\n"
+                    "selected.unlink()\n"
+                    "selected.symlink_to(target)\n"
+                    "try:\n"
+                    "    _frozen_executable([str(selected)])\n"
+                    "except BrowserUseUnavailable:\n"
+                    "    raise SystemExit(0)\n"
+                    "raise SystemExit(1)\n"
+                )
+
+                completed = subprocess.run(
+                    [sys.executable, "-c", probe],
+                    cwd=project_root,
+                    env={**os.environ, "PYTHONPATH": str(project_root)},
+                    timeout=2,
+                    check=False,
+                )
+
+                self.assertEqual(completed.returncode, 0, target.name)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux /proc identity contract")
+    def test_daemon_attestation_fails_closed_without_process_start_token(self) -> None:
+        from chip_relay.browser_use import BrowserUseIsolation, _attest_daemon
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            runtime = root / "runtime"
+            runtime.mkdir()
+            (runtime / "bu.sock").touch()
+            isolation = BrowserUseIsolation(root, runtime, root / "tmp", root / "workspace", root / "config", "probe")
+            replies = [
+                {"pong": True, "pid": os.getpid(), "browser_kind": "cdp"},
+                {"result": {"product": "Chrome/1"}},
+            ]
+
+            with (
+                mock.patch("chip_relay.browser_use._daemon_request", side_effect=replies),
+                mock.patch("chip_relay.browser_use._process_start_token", return_value=None),
+            ):
+                self.assertIsNone(_attest_daemon(isolation))
+
     def test_output_cap_fails_closed_without_putting_output_in_summary(self) -> None:
         from chip_relay.browser_use import MAX_OUTPUT_BYTES, execute_browser_use
 
@@ -605,6 +668,29 @@ print({str(outside)!r})
                 encoding="utf-8",
             )
             metadata.chmod(0o600)
+            self.assertEqual(browser_use_summary(run_dir)["status"], "invalid")
+
+    def test_summary_rejects_impossible_cdp_daemon_success_tuple(self) -> None:
+        from chip_relay.browser_use import browser_use_summary, execute_browser_use
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            fake_cli = root / "ok.py"
+            fake_cli.write_text("import sys\nsys.stdin.read()\nprint('ok')\n", encoding="utf-8")
+            config = self.make_config(root, command=f"{sys.executable} {fake_cli}")
+            run_dir = self.make_run(config)
+            result = execute_browser_use(config, run_dir, run_dir / "scripts" / "browser-use.py", timeout=10)
+            self.assertEqual(result["cdp"], "configured-command-unattested")
+            metadata = run_dir / "results" / "browser-use" / "last.json"
+            payload = json.loads(metadata.read_text(encoding="utf-8"))
+            payload["daemon"] = {
+                "status": "attested-and-closed",
+                "browser_kind": "cdp",
+                "probe": "Browser.getVersion",
+            }
+            metadata.write_text(json.dumps(payload), encoding="utf-8")
+            metadata.chmod(0o600)
+
             self.assertEqual(browser_use_summary(run_dir)["status"], "invalid")
 
     def test_non_loopback_cdp_and_unsafe_script_path_fail_closed(self) -> None:

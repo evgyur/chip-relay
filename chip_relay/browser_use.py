@@ -496,7 +496,7 @@ def _close_process_group(group_id: int) -> None:
 
 def _frozen_executable(command: list[str]) -> tuple[list[str], int | None, tuple[int, ...], str | None]:
     try:
-        fd = os.open(command[0], os.O_RDONLY | os.O_CLOEXEC)
+        fd = os.open(command[0], os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NONBLOCK", 0))
     except OSError as exc:
         raise BrowserUseUnavailable("browser_use_cli_identity") from exc
     metadata = os.fstat(fd)
@@ -762,9 +762,12 @@ def _attest_daemon(isolation: BrowserUseIsolation) -> dict[str, Any] | None:
             raise ValueError("browser_use_daemon_attestation")
     except (OSError, TypeError, ValueError, TimeoutError):
         return None
+    process_start = _process_start_token(pid)
+    if sys.platform.startswith("linux") and process_start is None:
+        return None
     return {
         "pid": pid,
-        "process_start": _process_start_token(pid),
+        "process_start": process_start,
         "browser_kind": "cdp",
         "cdp_probe": "Browser.getVersion",
     }
@@ -1028,6 +1031,8 @@ def _load_result(path: Path, *, run_dir: Path) -> dict[str, Any] | None:
     ):
         raise ValueError("browser_use_metadata")
     if payload["cdp"] == "isolated-daemon-cdp" and payload["daemon"].get("status") != "attested-and-closed":
+        raise ValueError("browser_use_metadata")
+    if payload["cdp"] == "configured-command-unattested" and payload["daemon"].get("status") != "not-attested":
         raise ValueError("browser_use_metadata")
     if payload.get("runner") == "browser-use" and payload.get("status") == "succeeded" and payload["cdp"] != "isolated-daemon-cdp":
         raise ValueError("browser_use_metadata")
