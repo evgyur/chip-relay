@@ -8,6 +8,7 @@ import pathlib
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -105,6 +106,11 @@ capture_screenshot()
             validate_read_only_script(
                 "new_tab('https://internal.example')",
                 resolver=lambda *_args, **_kwargs: [(2, 1, 6, "", (private_address, 443))],
+            )
+        with self.assertRaisesRegex(ValueError, "browser_use_public_https_url_required"):
+            validate_read_only_script(
+                "new_tab('https://empty.example')",
+                resolver=lambda *_args, **_kwargs: [],
             )
 
     def test_execute_pipes_validated_script_to_cli_with_relay_cdp_and_metadata_only_result(self) -> None:
@@ -204,6 +210,29 @@ print(shot)
             self.assertEqual(result["failure"], "output_too_large")
             self.assertLessEqual(result["stdout"]["size_bytes"], MAX_OUTPUT_BYTES)
             self.assertNotIn("x" * 100, json.dumps(result))
+
+    def test_timeout_kills_browser_use_process_group(self) -> None:
+        from chip_relay.browser_use import execute_browser_use
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            marker = root / "late-child-write"
+            fake_cli = root / "hang.py"
+            child = f"import pathlib,time;time.sleep(1.5);pathlib.Path({str(marker)!r}).write_text('late')"
+            fake_cli.write_text(
+                "import subprocess,sys,time\n"
+                "sys.stdin.read()\n"
+                f"subprocess.Popen([sys.executable, '-c', {child!r}])\n"
+                "time.sleep(10)\n",
+                encoding="utf-8",
+            )
+            config = self.make_config(root, command=f"{sys.executable} {fake_cli}")
+            run_dir = self.make_run(config)
+            result = execute_browser_use(config, run_dir, run_dir / "scripts" / "browser-use.py", timeout=1.0)
+            self.assertEqual(result["status"], "failed")
+            self.assertEqual(result["failure"], "timeout")
+            time.sleep(0.8)
+            self.assertFalse(marker.exists())
 
     def test_malformed_screenshot_is_not_imported(self) -> None:
         from chip_relay.browser_use import execute_browser_use
