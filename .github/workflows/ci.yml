@@ -12,6 +12,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Install test dependencies
+        run: python3 -m pip install 'playwright>=1.40,<2' 'websocket-client>=1.8,<2'
       - name: Public hygiene
         run: python3 tests/test_public_hygiene.py
       - name: Python compile
