@@ -763,7 +763,7 @@ def _attest_daemon(isolation: BrowserUseIsolation) -> dict[str, Any] | None:
     except (OSError, TypeError, ValueError, TimeoutError):
         return None
     process_start = _process_start_token(pid)
-    if sys.platform.startswith("linux") and process_start is None:
+    if process_start is None:
         return None
     return {
         "pid": pid,
@@ -782,10 +782,12 @@ def _process_alive(pid: int) -> bool:
 
 
 def _same_attested_process(pid: int, start_token: str | None) -> bool:
+    if start_token is None:
+        return False
     if not _process_alive(pid):
         return False
     current = _process_start_token(pid)
-    return start_token is None or current == start_token
+    return current == start_token
 
 
 def _terminate_attested_process(pid: int, start_token: str | None) -> bool:
@@ -1030,9 +1032,14 @@ def _load_result(path: Path, *, run_dir: Path) -> dict[str, Any] | None:
         or payload["daemon"].get("status") not in {"attested-and-closed", "not-attested", "cleanup-failed"}
     ):
         raise ValueError("browser_use_metadata")
-    if payload["cdp"] == "isolated-daemon-cdp" and payload["daemon"].get("status") != "attested-and-closed":
+    daemon_status = payload["daemon"].get("status")
+    if daemon_status == "attested-and-closed" and payload["cdp"] != "isolated-daemon-cdp":
         raise ValueError("browser_use_metadata")
-    if payload["cdp"] == "configured-command-unattested" and payload["daemon"].get("status") != "not-attested":
+    if daemon_status == "not-attested" and payload["cdp"] != "configured-command-unattested":
+        raise ValueError("browser_use_metadata")
+    if daemon_status == "cleanup-failed" and (
+        payload["status"] != "failed" or payload.get("failure") != "browser_use_daemon_cleanup_failed"
+    ):
         raise ValueError("browser_use_metadata")
     if payload.get("runner") == "browser-use" and payload.get("status") == "succeeded" and payload["cdp"] != "isolated-daemon-cdp":
         raise ValueError("browser_use_metadata")

@@ -28,7 +28,7 @@ _FETCH_LOCK = threading.Lock()
 _BROWSER_FETCH_SCRIPT = r"""
 async ({ url, method, expectedOrigin, maxBytes, timeoutMs, contentTypes }) => {
   if (window.location.origin !== expectedOrigin) return { kind: "origin_changed" };
-  const controller = new AbortController();
+  const controller = new globalThis.AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   const rejectResponse = async (kind, response = null, reader = null) => {
     try {

@@ -234,6 +234,25 @@ print(shot)
 
             self.assertEqual(browser_use_summary(run_dir)["status"], "not-run")
 
+    def test_cleanup_failure_publishes_a_valid_failed_summary(self) -> None:
+        from chip_relay.browser_use import browser_use_summary, execute_browser_use
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            fake_cli = root / "ok.py"
+            fake_cli.write_text("import sys\nsys.stdin.read()\nprint('ok')\n", encoding="utf-8")
+            config = self.make_config(root, command=f"{sys.executable} {fake_cli}")
+            run_dir = self.make_run(config)
+
+            with mock.patch("chip_relay.browser_use._shutdown_daemon", return_value=False):
+                result = execute_browser_use(config, run_dir, run_dir / "scripts" / "browser-use.py", timeout=10)
+
+            summary = browser_use_summary(run_dir)
+            self.assertEqual(result["status"], "failed")
+            self.assertEqual(result["failure"], "browser_use_daemon_cleanup_failed")
+            self.assertEqual(summary["status"], "failed")
+            self.assertEqual(summary["failure"], "browser_use_daemon_cleanup_failed")
+
     @unittest.skipIf(os.name == "nt", "venv layout probe")
     def test_descriptor_pinning_preserves_virtualenv_identity(self) -> None:
         from chip_relay.browser_use import execute_browser_use
@@ -328,6 +347,21 @@ print(shot)
                 mock.patch("chip_relay.browser_use._process_start_token", return_value=None),
             ):
                 self.assertIsNone(_attest_daemon(isolation))
+
+    def test_pid_helper_never_falls_back_to_pid_only_identity(self) -> None:
+        from chip_relay.browser_use import (
+            _same_attested_process,
+            _terminate_attested_process,
+        )
+
+        with (
+            mock.patch("chip_relay.browser_use._process_alive", return_value=True),
+            mock.patch("chip_relay.browser_use.os.kill") as kill,
+        ):
+            self.assertFalse(_same_attested_process(os.getpid(), None))
+            self.assertTrue(_terminate_attested_process(os.getpid(), None))
+
+        kill.assert_not_called()
 
     def test_output_cap_fails_closed_without_putting_output_in_summary(self) -> None:
         from chip_relay.browser_use import MAX_OUTPUT_BYTES, execute_browser_use
