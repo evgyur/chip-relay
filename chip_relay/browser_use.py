@@ -16,9 +16,10 @@ import subprocess
 import tempfile
 import time
 import zlib
+from collections.abc import Callable, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any
 from urllib.parse import urlsplit
 
 from .config import RelayConfig
@@ -163,7 +164,7 @@ def _validate_helper_call(call: ast.Call, resolver: Resolver) -> int:
 
 def validate_read_only_script(source: str, *, resolver: Resolver = socket.getaddrinfo) -> dict[str, Any]:
     if not isinstance(source, str):
-        raise ValueError("browser_use_script")
+        raise TypeError("browser_use_script")
     encoded = source.encode("utf-8")
     if not encoded or len(encoded) > MAX_SCRIPT_BYTES or "\x00" in source:
         raise ValueError("browser_use_script")

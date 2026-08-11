@@ -5,13 +5,13 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from .captcha import captcha_summary
 from .browser_use import browser_use_summary
+from .captcha import captcha_summary
 from .config import RelayConfig
-from .workspace import load_manifest
 from .init_scripts import list_init_scripts
 from .network import load_observations
 from .protection import protection_summary
+from .workspace import load_manifest
 
 ARTIFACT_POLICY = "private-local/no-auto-send"
 _UNINDEXED_PRIVATE_ARTIFACTS = {

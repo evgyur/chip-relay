@@ -66,7 +66,7 @@ capture_screenshot()
         payload = validate_read_only_script(
             allowed,
             resolver=lambda *_args, **_kwargs: [
-                (2, 1, 6, "", (".".join(("93", "184", "216", "34")), 443))
+                (2, 1, 6, "", (".".join(("93", "184", "216", "34")), 443))  # noqa: FLY002
             ],
         )
         self.assertEqual(payload["mode"], "cooperative-read-only")
@@ -85,7 +85,7 @@ capture_screenshot()
             with self.subTest(source=source), self.assertRaises(ValueError):
                 validate_read_only_script(source)
 
-        private_address = ".".join(("10", "0", "0", "9"))
+        private_address = ".".join(("10", "0", "0", "9"))  # noqa: FLY002
         with self.assertRaisesRegex(ValueError, "browser_use_public_https_url_required"):
             validate_read_only_script(
                 "new_tab('https://internal.example')",
@@ -136,7 +136,7 @@ print(shot)
                 script,
                 timeout=10,
                 resolver=lambda *_args, **_kwargs: [
-                    (2, 1, 6, "", (".".join(("93", "184", "216", "34")), 443))
+                    (2, 1, 6, "", (".".join(("93", "184", "216", "34")), 443))  # noqa: FLY002
                 ],
             )
 
@@ -260,7 +260,7 @@ print(shot)
             script = run_dir / "scripts" / "browser-use.py"
             script.write_text("print(page_info())\n", encoding="utf-8")
 
-            non_loopback = ".".join(("192", "0", "2", "10"))
+            non_loopback = ".".join(("192", "0", "2", "10"))  # noqa: FLY002
             unsafe_config = RelayConfig(**{**config.__dict__, "cdp_url": f"http://{non_loopback}:9222"})
             with self.assertRaisesRegex(ValueError, "browser_use_loopback_cdp_required"):
                 browser_use_plan(unsafe_config, run_dir, script)
@@ -299,6 +299,7 @@ print(shot)
                     text=True,
                     capture_output=True,
                     timeout=30,
+                    check=False,
                 )
                 self.assertEqual(proc.returncode, 0, proc.stderr)
                 self.assertEqual(json.loads(proc.stdout)["status"], expected)

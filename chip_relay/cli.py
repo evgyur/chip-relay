@@ -14,7 +14,11 @@ from .browser_use import (
     execute_browser_use,
 )
 from .captcha import captcha_summary, inspect_captcha_gate, wait_for_captcha_clearance
-from .captcha_visual import apply_captcha_visual_actions, capture_captcha_visual, parse_visual_points
+from .captcha_visual import (
+    apply_captcha_visual_actions,
+    capture_captcha_visual,
+    parse_visual_points,
+)
 from .cleanup import run_cleanup
 from .config import load_config
 from .hermes_context import hermes_task_context
@@ -29,7 +33,13 @@ from .protection import (
     record_page_signals,
     sanitize_observer_snapshot,
 )
-from .recipes import list_recipes, load_recipe, pack_run, parse_params, prepare_recipe_run
+from .recipes import (
+    list_recipes,
+    load_recipe,
+    pack_run,
+    parse_params,
+    prepare_recipe_run,
+)
 from .relay_adapter import format_evidence_lines, relay_response
 from .reports import artifacts_report, evidence_report
 from .stealth import load_sample, stealth_doctor
