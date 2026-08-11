@@ -20,6 +20,7 @@ class RelayConfig:
     proxy: str | None
     upload_allowed_dirs: str | None
     proxy_auth: ProxyAuthDescriptor | None = None
+    browser_use_command: str | None = None
 
 
 def _expand(path: str) -> Path:
@@ -38,6 +39,7 @@ def load_config() -> RelayConfig:
     proxy_descriptor = load_proxy_auth_descriptor(os.environ)
     proxy = proxy_descriptor.server if proxy_descriptor is not None else None
     upload_allowed_dirs = os.environ.get("CHIP_RELAY_UPLOAD_ALLOWED_DIRS")
+    browser_use_command = os.environ.get("CHIP_RELAY_BROWSER_USE_COMMAND")
     return RelayConfig(
         base_dir=base_dir,
         runs_dir=runs_dir,
@@ -50,4 +52,5 @@ def load_config() -> RelayConfig:
         proxy=proxy,
         upload_allowed_dirs=upload_allowed_dirs,
         proxy_auth=proxy_descriptor if proxy_descriptor is not None and proxy_descriptor.authenticated else None,
+        browser_use_command=browser_use_command,
     )

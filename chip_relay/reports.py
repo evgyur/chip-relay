@@ -6,6 +6,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from .captcha import captcha_summary
+from .browser_use import browser_use_summary
 from .config import RelayConfig
 from .workspace import load_manifest
 from .init_scripts import list_init_scripts
@@ -114,6 +115,7 @@ def evidence_report(config: RelayConfig, run_dir: Path) -> dict[str, Any]:
         },
         "protection": protection_summary(run_dir),
         "captcha": captcha_summary(run_dir),
+        "browser_use": browser_use_summary(run_dir),
         "artifact_policy": ARTIFACT_POLICY,
         "delivery": "metadata-only",
         "blocker": blocker_for(manifest),

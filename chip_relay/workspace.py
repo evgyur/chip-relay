@@ -261,6 +261,13 @@ if __name__ == "__main__":
 '''
 
 
+def browser_use_template() -> str:
+    return """# Bounded Browser Use CLI program. Relay accepts only its cooperative read-only AST subset.
+ensure_real_tab()
+print(page_info())
+"""
+
+
 def init_run(config: RelayConfig, title: str, *, run_id: str | None = None, template: str = "placeholder") -> RunWorkspace:
     config.runs_dir.mkdir(parents=True, exist_ok=True)
     rid = validate_run_id(run_id or make_run_id(title))
@@ -274,6 +281,9 @@ def init_run(config: RelayConfig, title: str, *, run_id: str | None = None, temp
     final_path = run_dir / "scripts" / "final.py"
     final_path.write_text(final_template(title, template=template), encoding="utf-8")
     final_path.chmod(0o755)
+    browser_use_path = run_dir / "scripts" / "browser-use.py"
+    browser_use_path.write_text(browser_use_template(), encoding="utf-8")
+    browser_use_path.chmod(0o600)
     manifest = default_manifest(config, rid, title, run_dir, template=template)
     write_manifest(run_dir, manifest)
     return RunWorkspace(run_id=rid, run_dir=run_dir, manifest=manifest)

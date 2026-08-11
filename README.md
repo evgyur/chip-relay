@@ -66,6 +66,7 @@ CHIP_RELAY_DISPLAY=:1002
 CHIP_RELAY_HEADLESS=0|1
 CHIP_RELAY_PROXY=http://proxy.example:8080
 CHIP_RELAY_PROXY_SECRET_FILE=/absolute/private/path/proxy-auth.json
+CHIP_RELAY_BROWSER_USE_COMMAND=browser-use
 CLOAKBROWSER_FINGERPRINT_PLATFORM=windows|macos
 ```
 
@@ -130,6 +131,10 @@ scripts/chip-relay task captcha <run_id> show
 scripts/chip-relay task captcha <run_id> resume --timeout 30
 scripts/chip-relay task init-script <run_id> add webdriver --file init/webdriver.js
 scripts/chip-relay task init-script <run_id> list
+scripts/chip-relay task browser-use <run_id> doctor
+scripts/chip-relay task browser-use <run_id> plan --script ~/.local/share/chip-relay/runs/<run_id>/scripts/browser-use.py
+scripts/chip-relay task browser-use <run_id> execute --script ~/.local/share/chip-relay/runs/<run_id>/scripts/browser-use.py
+scripts/chip-relay task browser-use <run_id> show
 scripts/chip-relay cleanup
 scripts/chip-relay cleanup --execute
 scripts/chip-relay stealth doctor --preset cf-sensitive
@@ -150,6 +155,8 @@ Default runtime paths:
 ├── task.md
 ├── manifest.json
 ├── scripts/final.py
+├── scripts/browser-use.py
+├── browser-use/workspace/
 ├── logs/
 ├── screenshots/
 ├── traces/
@@ -162,6 +169,21 @@ Default runtime paths:
 `task run` executes `scripts/final.py` once, captures `logs/run.log`, injects `CHIP_RELAY_CDP_URL`, and marks the manifest `ran` or `failed`. Run and verify executions are serialized by a run-scoped lock. On Linux, a non-replaceable abstract Unix-socket authority backs the pinned-descriptor lock files, so unlink/recreation cannot bypass serialization. Execution IDs are monotonic; malformed execution state fails closed, while only a manifest with no `execution` record is treated as legacy generation zero.
 
 `task context` is the Hermes-native workflow primitive. It returns `chip-relay-hermes-workflow-context-v1`: task, `task_brief`, rail, editable files, verify/show/artifacts commands, current verification state, evidence summary, and metadata-only artifact paths. This is the preferred integration when Hermes itself is the agent: Hermes reads the brief, edits `scripts/final.py`, runs `task verify`, reads structured feedback/evidence, and never sends artifact contents to chat by default. `--write` stores the same context at `agent/hermes-context.json` for repeatable handoff.
+
+### Browser Use CLI bridge
+
+The optional Browser Use lane follows the same stdin-program protocol as upstream Hermes `browser_exec`, while keeping the browser itself on Relay's existing loopback CDP rail:
+
+```text
+Hermes / operator -> scripts/browser-use.py -> Browser Use CLI stdin
+                  -> BU_CDP_URL=Relay loopback CDP -> private-local evidence
+```
+
+Relay does not copy Browser Use or register a second Hermes tool schema. `doctor` selects an explicitly configured trusted command, an installed `browser-use`, or `uvx browser-use`. `plan` validates the exact script and reports its SHA-256. `execute` sends that already-read script to stdin with a minimal child environment, a run-private `BH_AGENT_WORKSPACE`, a bounded timeout, disabled recording, and 1 MiB stdout/stderr caps. A fresh PNG path emitted by `capture_screenshot()` is opened without following symlinks, structurally validated, copied into run-private `screenshots/`, and indexed by hash; the temporary source is removed only when its inode still matches. Reports contain hashes, sizes, status, runner class, and duration; raw output remains under private-local `logs/`.
+
+This lane is deliberately **read-only first**. The accepted AST subset has no imports, dynamic attributes, `js`, raw `cdp`, arbitrary builtins, click, type, upload, form submit, purchase, publish, or delete. It permits only direct calls to the current Browser Use CLI helpers `new_tab`, `goto_url`, `wait_for_load`, `page_info`, `capture_screenshot`, and `ensure_real_tab`, plus assignments and `print` of bounded simple values. Navigation preflight requires public HTTPS and rejects non-global DNS answers.
+
+The boundary is stated narrowly: this is a cooperative policy for the supplied script, **not a Python sandbox, network namespace, redirect firewall, or protection against a malicious same-UID Browser Use binary**. DNS can change after preflight and a public site can redirect. Attached persistent profiles can expose authenticated page data even without mutations, so Browser Use output stays private-local and this lane must not be used for untrusted programs or irreversible actions. The upstream token-reduction claim is not treated as a Relay benchmark until an exact local A/B corpus is run.
 
 `task loop` is the public-safe external-agent bridge. It writes `agent/request-NNN.json`, runs the external `--agent-command` with `CHIP_RELAY_AGENT_CONTEXT`, then calls `task verify`. If verification fails, the next request includes the redacted previous failure under `previous_result`. Loop artifacts stay inside `agent/`: request JSON, feedback JSON, redacted command logs, and `loop-result.json`.
 

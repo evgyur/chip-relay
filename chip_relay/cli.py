@@ -6,6 +6,13 @@ from pathlib import Path
 from typing import Any
 
 from .agent_loop import run_agent_loop
+from .browser_use import (
+    BrowserUseUnavailable,
+    browser_use_doctor,
+    browser_use_plan,
+    browser_use_summary,
+    execute_browser_use,
+)
 from .captcha import captcha_summary, inspect_captcha_gate, wait_for_captcha_clearance
 from .captcha_visual import apply_captcha_visual_actions, capture_captcha_visual, parse_visual_points
 from .cleanup import run_cleanup
@@ -141,6 +148,17 @@ def build_parser() -> argparse.ArgumentParser:
     init_add.add_argument("--file", required=True)
     init_script_sub.add_parser("list")
 
+    browser_use = task_sub.add_parser("browser-use")
+    browser_use.add_argument("run")
+    browser_use_sub = browser_use.add_subparsers(dest="browser_use_command", required=True)
+    browser_use_sub.add_parser("doctor")
+    browser_use_plan_parser = browser_use_sub.add_parser("plan")
+    browser_use_plan_parser.add_argument("--script", required=True)
+    browser_use_execute = browser_use_sub.add_parser("execute")
+    browser_use_execute.add_argument("--script", required=True)
+    browser_use_execute.add_argument("--timeout", type=float, default=120)
+    browser_use_sub.add_parser("show")
+
     doctor = sub.add_parser("doctor")
     doctor.add_argument("topic", nargs="?", default="webwright", choices=["webwright", "playwright"])
 
@@ -250,6 +268,37 @@ def cmd_task_init_script(args: argparse.Namespace, config) -> int:
         emit({"status": "ok", "run_id": run_dir.name, "scripts": list_init_scripts(run_dir)}, json_mode=args.json_mode)
         return 0
     raise SystemExit(f"unknown init-script command: {args.init_script_command}")
+
+
+def cmd_task_browser_use(args: argparse.Namespace, config) -> int:
+    run_dir = resolve_run(config, args.run)
+    if args.browser_use_command == "doctor":
+        payload = browser_use_doctor(config)
+    elif args.browser_use_command == "plan":
+        payload = browser_use_plan(config, run_dir, Path(args.script))
+    elif args.browser_use_command == "execute":
+        try:
+            payload = execute_browser_use(
+                config,
+                run_dir,
+                Path(args.script),
+                timeout=args.timeout,
+            )
+        except BrowserUseUnavailable as exc:
+            payload = {
+                "schema": "chip-relay-browser-use-result-v1",
+                "status": "blocked",
+                "mode": "cooperative-read-only",
+                "failure": str(exc),
+                "artifact_policy": "private-local/metadata-only-report",
+            }
+    elif args.browser_use_command == "show":
+        payload = browser_use_summary(run_dir)
+    else:
+        raise SystemExit(f"unknown browser-use command: {args.browser_use_command}")
+    payload["run_id"] = run_dir.name
+    emit(payload, json_mode=args.json_mode)
+    return 0 if payload["status"] in {"ready", "succeeded", "not-run"} else 1
 
 
 def cmd_task_captcha(args: argparse.Namespace, config) -> int:
@@ -437,6 +486,8 @@ def cmd_task(args: argparse.Namespace) -> int:
         return cmd_task_captcha(args, config)
     if args.task_command == "init-script":
         return cmd_task_init_script(args, config)
+    if args.task_command == "browser-use":
+        return cmd_task_browser_use(args, config)
     raise SystemExit(f"unknown task command: {args.task_command}")
 
 
