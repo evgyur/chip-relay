@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 from chip_relay.cli import build_parser
 from chip_relay.config import RelayConfig
@@ -35,6 +36,20 @@ class BrowserUseBridgeTests(unittest.TestCase):
 
     def make_run(self, config: RelayConfig) -> pathlib.Path:
         return init_run(config, "Browser Use bridge", run_id="browser-use-test").run_dir
+
+    def test_doctor_does_not_auto_download_unpinned_cli(self) -> None:
+        from chip_relay.browser_use import browser_use_doctor
+
+        with tempfile.TemporaryDirectory() as tmp:
+            config = self.make_config(pathlib.Path(tmp), command=None)
+
+            def only_uvx(name: str) -> str | None:
+                return "/usr/bin/uvx" if name == "uvx" else None
+
+            with mock.patch("chip_relay.browser_use.shutil.which", side_effect=only_uvx):
+                payload = browser_use_doctor(config)
+            self.assertEqual(payload["status"], "blocked")
+            self.assertIn("browser_use_cli_missing", payload["errors"])
 
     def test_new_run_contains_safe_browser_use_script_template(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -113,6 +128,8 @@ with open(shot, 'wb') as handle:
 print(json.dumps({
     'cdp': os.environ.get('BU_CDP_URL'),
     'workspace': os.environ.get('BH_AGENT_WORKSPACE'),
+    'secret_present': 'RELAY_TEST_SECRET' in os.environ,
+    'umask': oct(os.umask(0)),
     'source_sha': __import__('hashlib').sha256(source.encode()).hexdigest(),
 }))
 print(shot)
@@ -130,15 +147,16 @@ print(shot)
                 encoding="utf-8",
             )
 
-            result = execute_browser_use(
-                config,
-                run_dir,
-                script,
-                timeout=10,
-                resolver=lambda *_args, **_kwargs: [
-                    (2, 1, 6, "", (".".join(("93", "184", "216", "34")), 443))  # noqa: FLY002
-                ],
-            )
+            with mock.patch.dict(os.environ, {"RELAY_TEST_SECRET": "private"}, clear=False):
+                result = execute_browser_use(
+                    config,
+                    run_dir,
+                    script,
+                    timeout=10,
+                    resolver=lambda *_args, **_kwargs: [
+                        (2, 1, 6, "", (".".join(("93", "184", "216", "34")), 443))  # noqa: FLY002
+                    ],
+                )
 
             self.assertEqual(result["status"], "succeeded")
             self.assertEqual(result["mode"], "cooperative-read-only")
@@ -153,6 +171,8 @@ print(shot)
             log_payload = json.loads((run_dir / "logs" / "browser-use.log").read_text(encoding="utf-8").splitlines()[0])
             self.assertEqual(log_payload["cdp"], config.cdp_url)
             self.assertTrue(pathlib.Path(log_payload["workspace"]).is_relative_to(run_dir))
+            self.assertFalse(log_payload["secret_present"])
+            self.assertEqual(log_payload["umask"], "0o77")
             self.assertTrue(result["screenshot"]["path"].startswith("screenshots/"))
             self.assertTrue((run_dir / result["screenshot"]["path"]).is_file())
             self.assertNotIn("source-shot", json.dumps(result))
@@ -206,6 +226,35 @@ print(shot)
             result = execute_browser_use(config, run_dir, run_dir / "scripts" / "browser-use.py", timeout=10)
             self.assertEqual(result["status"], "succeeded")
             self.assertIsNone(result["screenshot"])
+
+    def test_screenshot_outside_cli_temp_roots_is_ignored(self) -> None:
+        from chip_relay.browser_use import execute_browser_use
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            outside = root / "outside.png"
+            fake_cli = root / "outside_image.py"
+            fake_cli.write_text(
+                f"""import struct, sys, zlib
+sys.stdin.read()
+def chunk(kind, data):
+    return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind + data) & 0xffffffff)
+png = bytes.fromhex('89504e470d0a1a0a')
+png += chunk(b'IHDR', struct.pack('>IIBBBBB', 1, 1, 8, 6, 0, 0, 0))
+png += chunk(b'IDAT', zlib.compress(b'\\x00\\x00\\x00\\x00\\x00'))
+png += chunk(b'IEND', b'')
+with open({str(outside)!r}, 'wb') as handle:
+    handle.write(png)
+print({str(outside)!r})
+""",
+                encoding="utf-8",
+            )
+            config = self.make_config(root, command=f"{sys.executable} {fake_cli}")
+            run_dir = self.make_run(config)
+            result = execute_browser_use(config, run_dir, run_dir / "scripts" / "browser-use.py", timeout=10)
+            self.assertEqual(result["status"], "succeeded")
+            self.assertIsNone(result["screenshot"])
+            self.assertTrue(outside.is_file())
 
     def test_summary_rejects_symlink_metadata(self) -> None:
         from chip_relay.browser_use import browser_use_summary

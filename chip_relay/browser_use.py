@@ -295,9 +295,6 @@ def _command(config: RelayConfig) -> tuple[list[str], str]:
     direct = shutil.which("browser-use")
     if direct:
         return [direct], "browser-use"
-    uvx = shutil.which("uvx")
-    if uvx:
-        return [uvx, "browser-use"], "uvx"
     raise BrowserUseUnavailable("browser_use_cli_missing")
 
 
@@ -438,6 +435,7 @@ def _run_cli(
                 stdout=stdout_file,
                 stderr=stderr_file,
                 start_new_session=True,
+                umask=0o077 if os.name == "posix" else -1,
             )
         except OSError as exc:
             raise BrowserUseUnavailable("browser_use_cli_start_failed") from exc
@@ -512,6 +510,15 @@ def _valid_png(data: bytes) -> bool:
 
 
 def _capture_screenshot_artifact(run_dir: Path, stdout: bytes, *, started_wall: float) -> dict[str, Any] | None:
+    allowed_roots: set[Path] = set()
+    for root in (
+        run_dir / "browser-use",
+        Path.home() / ".config" / "browser-harness" / "tmp",
+    ):
+        try:
+            allowed_roots.add(root.resolve(strict=True))
+        except OSError:
+            continue
     candidates: list[Path] = []
     for raw_line in stdout.decode("utf-8", errors="replace").splitlines():
         text = raw_line.strip()
@@ -520,6 +527,11 @@ def _capture_screenshot_artifact(run_dir: Path, stdout: bytes, *, started_wall: 
             if candidate.is_absolute() and candidate.suffix.lower() == ".png":
                 candidates.append(candidate)
     for candidate in reversed(candidates):
+        try:
+            if candidate.parent.resolve(strict=True) not in allowed_roots:
+                continue
+        except OSError:
+            continue
         try:
             fd = os.open(
                 candidate,
@@ -668,6 +680,14 @@ def _validate_stored_screenshot(run_dir: Path, payload: Any) -> None:
             if not chunk:
                 break
             data.extend(chunk)
+        final_metadata = os.fstat(fd)
+        if (
+            final_metadata.st_dev != metadata.st_dev
+            or final_metadata.st_ino != metadata.st_ino
+            or final_metadata.st_size != metadata.st_size
+            or final_metadata.st_mtime_ns != metadata.st_mtime_ns
+        ):
+            raise ValueError("browser_use_screenshot_metadata")
     finally:
         os.close(fd)
     if len(data) != payload["size_bytes"] or _sha256(bytes(data)) != payload["sha256"] or not _valid_png(bytes(data)):

@@ -179,7 +179,13 @@ Hermes / operator -> scripts/browser-use.py -> Browser Use CLI stdin
                   -> BU_CDP_URL=Relay loopback CDP -> private-local evidence
 ```
 
-Relay does not copy Browser Use or register a second Hermes tool schema. `doctor` selects an explicitly configured trusted command, an installed `browser-use`, or `uvx browser-use`. `plan` validates the exact script and reports its SHA-256. `execute` sends that already-read script to stdin with a minimal child environment, a run-private `BH_AGENT_WORKSPACE`, a bounded timeout, disabled recording, and 1 MiB stdout/stderr caps. A fresh PNG path emitted by `capture_screenshot()` is opened without following symlinks, structurally validated, copied into run-private `screenshots/`, and indexed by hash; the temporary source is removed only when its inode still matches. Reports contain hashes, sizes, status, runner class, and duration; raw output remains under private-local `logs/`.
+Install a reviewed version explicitly; the live smoke for this change used Browser Use package `0.13.7` (its bundled harness reports CLI `0.1.8`):
+
+```bash
+uv tool install 'browser-use[cli]==0.13.7'
+```
+
+Relay does not copy Browser Use or register a second Hermes tool schema. `doctor` selects an explicitly configured trusted command or an installed `browser-use`; it does not auto-download an unpinned package. Install and pin the CLI separately, or set `CHIP_RELAY_BROWSER_USE_COMMAND` to a trusted, version-pinned command. `plan` validates the exact script and reports its SHA-256. `execute` sends that already-read script to stdin with a minimal child environment, a run-private `BH_AGENT_WORKSPACE`, a bounded timeout, disabled recording, and 1 MiB stdout/stderr caps. A fresh PNG path emitted by `capture_screenshot()` is opened without following symlinks, structurally validated, copied into run-private `screenshots/`, and indexed by hash; the temporary source is removed only when its inode still matches. Reports contain hashes, sizes, status, runner class, and duration; raw output remains under private-local `logs/`.
 
 This lane is deliberately **read-only first**. The accepted AST subset has no imports, dynamic attributes, `js`, raw `cdp`, arbitrary builtins, click, type, upload, form submit, purchase, publish, or delete. It permits only direct calls to the current Browser Use CLI helpers `new_tab`, `goto_url`, `wait_for_load`, `page_info`, `capture_screenshot`, and `ensure_real_tab`, plus assignments and `print` of bounded simple values. Navigation preflight requires public HTTPS and rejects non-global DNS answers.
 
