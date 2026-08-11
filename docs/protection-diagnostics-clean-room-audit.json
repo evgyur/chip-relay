@@ -11,7 +11,7 @@
     ],
     "whitespace": "collapsed"
   },
-  "audited_at": "2026-08-11T06:45:36Z",
+  "audited_at": "2026-08-11T06:49:05Z",
   "audited_files": [
     ".github/workflows/ci.yml",
     ".gitignore",
@@ -114,7 +114,7 @@
       "templates/chip-relay.env.example": "148ca5d2a755810fda5081660e88878adf417154ae7c2c2bc8d48756bb3a970e",
       "tests/fixtures/protection-rules-v1.json": "e972561d3f7646f5c0a6797ce2dd386af7a76e6ccf8802dc8663d480aab21be0",
       "tests/live_browser_fetch_smoke.py": "796529e4095baaab47d8118a7449c4c72ab73cba8257e64a7c675344dcff65fb",
-      "tests/test_authenticated_proxy.py": "e482d81962164d91c7ae030511b86245219e54b77550b9911b4c4576bd0f3e24",
+      "tests/test_authenticated_proxy.py": "405730d36b5cf31ab22fc9a1810ac211eb6f7419bcd4bd48ab504d77a5e60b49",
       "tests/test_browser_native_fetch.py": "1af2bffb10513257c0c4e60bc75fe9a179dc2a21e81a0cd0d45d48735077ddfb",
       "tests/test_browser_use_bridge.py": "671051784662047c64b5f6f61f5a6f6ed9dfa4e526f7b673433fa6b48a50b2ab",
       "tests/test_captcha_gate.py": "8cf2563be4678b1a0039fd47b524254f51dde492c962733f64c8cdd3c5f7f6e5",
