@@ -1,12 +1,12 @@
 ---
 name: chip-relay
 description: Portable browser relay skill for Hermes/agent automation. Use when you need a local CDP browser rail with switchable CloakBrowser and BrowserOS backends, persistent profiles, health checks, tab/open commands, or a public-safe /relay-style setup without private host paths or secrets.
-version: 0.4.0
+version: 0.6.0
 author: Hermes Agent
 license: MIT
 metadata:
   hermes:
-    tags: [browser, cdp, automation, cloakbrowser, browseros, relay, protection-diagnostics]
+    tags: [browser, cdp, automation, browser-use, cloakbrowser, browseros, relay, protection-diagnostics]
 ---
 
 # chip-relay
@@ -19,6 +19,7 @@ Use this skill when the user asks to:
 - expose a safe local Chrome DevTools Protocol endpoint for Playwright/Puppeteer/CDP tools;
 - keep a persistent browser profile for authenticated automation;
 - diagnose bot-detection/browser fingerprint issues without copying private cookies or secrets;
+- run bounded read-only Browser Use CLI programs through Relay's loopback CDP with private-local evidence;
 - detect CAPTCHA gates, wait for browser-native clearance, capture an interactive challenge privately for trusted local vision, apply bounded normalized clicks, and resume without exposing response tokens.
 
 ## Core model
@@ -108,6 +109,10 @@ scripts/chip-relay task captcha <run_id> show
 scripts/chip-relay task captcha <run_id> resume --timeout 30
 scripts/chip-relay task init-script <run_id> add webdriver --file init/webdriver.js
 scripts/chip-relay task init-script <run_id> list
+scripts/chip-relay task browser-use <run_id> doctor
+scripts/chip-relay task browser-use <run_id> plan --script ~/.local/share/chip-relay/runs/<run_id>/scripts/browser-use.py
+scripts/chip-relay task browser-use <run_id> execute --script ~/.local/share/chip-relay/runs/<run_id>/scripts/browser-use.py --timeout 120
+scripts/chip-relay task browser-use <run_id> show
 scripts/chip-relay cleanup
 scripts/chip-relay cleanup --execute
 scripts/chip-relay stealth doctor --preset cf-sensitive
@@ -129,12 +134,13 @@ Production adapter rules:
 - Protection output is diagnostic guidance only: no stealth, proxy rotation, or guaranteed bypass/success claim. The CAPTCHA gate may wait for browser-native managed clearance, then use a trusted local visual-assist loop or a person; it never dispatches a third-party solver or injects response tokens.
 - `task captcha ... inspect|wait|capture|act|show|resume` supports reCAPTCHA, hCaptcha, Turnstile, and Cloudflare challenge classification. Only after `human_required`, run `capture`, load the returned private-local image with Hermes' local vision tool, and run `act` only at confidence `>=0.85` with normalized challenge-relative points. `act` revalidates the hashed CDP document/loader identity, exact contained region, and live screenshot hash immediately before clicking, moves authorization to `applying` before any click and then to `consumed`/`uncertain`, and serializes capture/action calls under the run lock. Recapture after any stale or still-interactive result; stop after three visual cycles or any low-confidence challenge and use the trusted visible browser plus `resume`. Probe/state parsing is fail-closed; Cloudflare+Turnstile receives a browser-native wait window before visual/human handoff. State and challenge artifacts are mode `0600`, execution-attempt-bound, target- and document-pinned, integrity-checked, and never projected through `/relay`; Hermes context receives exact commands.
 - `task init-script` stores pre-document JavaScript under `init_scripts/` and reports only name/size/SHA-256; `example-title` loads it before navigation.
+- `task browser-use` sends a statically bounded read-only helper program to a trusted, separately pinned Browser Use CLI. Default executions get unique owner-only Browser Harness runtime/tmp/config paths, are bound to Relay's loopback `BU_CDP_URL`, attest `browser_kind=cdp` plus `Browser.getVersion`, and must close both daemon endpoint and process before success. Same-group descendants are killed after every direct CLI exit. Screenshot import requires an explicit `capture_screenshot()` AST call and a structurally valid PNG created in that execution's fresh temp root. Configured custom commands are labeled unattested. This is not a Python sandbox, redirect firewall, DNS-rebinding defense, or protection from a malicious same-UID CLI.
 - `doctor webwright` includes browser environment, exact CDP binding, and redacted `CHIP_RELAY_PROXY` diagnostics.
 - `cleanup` is dry-run by default and may only remove relay-managed paths inside `CHIP_RELAY_BASE_DIR`.
 - Upload helpers require `CHIP_RELAY_UPLOAD_ALLOWED_DIRS` and reject relative/outside/symlink paths.
 - `stealth doctor` is diagnostic-only: presets report fingerprint/challenge state, not guaranteed Cloudflare bypass.
 - Authenticated artifacts stay `private-local/no-auto-send` unless a separate policy-cleared export is built.
-- `task context` is the Hermes-native workflow primitive: Hermes is the agent, `/relay` is the browser tool/substrate. It returns the editable `scripts/final.py`, verify/show/artifact commands, current verification state, evidence summary, and metadata-only artifact paths.
+- `task context` is the Hermes-native workflow primitive: Hermes is the agent, `/relay` is the browser tool/substrate. It returns editable `scripts/final.py` and `scripts/browser-use.py`, Browser Use plan/execute/show commands, verify/show/artifact commands, current verification state, evidence summary, and metadata-only artifact paths.
 - new task workspaces include `task.brief_schema=chip-relay-agent-brief-v2` in `manifest.json` and matching sections in `task.md`: `agent_instructions`, `success_metrics`, `known_frictions`, and `verification_questions`.
 - Use `task context --write` to persist `agent/hermes-context.json` for repeatable handoff without exposing artifact contents in chat.
 - Agent integrations that are not Hermes-in-process stay outside the public repo and connect through `--agent-command` plus `CHIP_RELAY_AGENT_CONTEXT`.
