@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from .agent_loop import run_agent_loop
+from .benchmark import compare_results, gate_results, read_result
+from .benchmark_runner import run_benchmark
 from .captcha import captcha_summary, inspect_captcha_gate, wait_for_captcha_clearance
 from .captcha_visual import apply_captcha_visual_actions, capture_captcha_visual, parse_visual_points
 from .config import RelayConfig
@@ -72,7 +74,113 @@ def relay_response(config: RelayConfig, tokens: list[str]) -> RelayAdapterResult
         return _ok("artifacts", {"status": "ok", "artifacts": payload})
     if head == "recipe":
         return _recipe_response(config, tokens[1:])
+    if head == "stealth":
+        try:
+            return _stealth_response(config, tokens[1:])
+        except ValueError as exc:
+            gate = str(exc).split(":", 1)[0] or "stealth_command_failed"
+            return _fail(gate, str(exc), command="stealth")
     return _fail("unknown_relay_command", f"unknown relay command: {head}")
+
+
+def _option_value(tokens: list[str], index: int, option: str) -> tuple[str, int]:
+    if index + 1 >= len(tokens):
+        raise ValueError(f"usage: {option} requires a value")
+    return tokens[index + 1], index + 2
+
+
+def _stealth_response(config: RelayConfig, tokens: list[str]) -> RelayAdapterResult:
+    if not tokens:
+        return _fail(
+            "usage",
+            "usage: /relay stealth <benchmark|compare|gate>",
+            command="stealth",
+        )
+    action = tokens[0]
+    if action == "benchmark":
+        backends: list[str] = []
+        required: set[str] = set()
+        suite = "local"
+        repeat = 1
+        preset = "normal"
+        index = 1
+        while index < len(tokens):
+            option = tokens[index]
+            if option in {"--backend", "--require-backend", "--suite", "--repeat", "--preset"}:
+                value, index = _option_value(tokens, index, option)
+                if option == "--backend":
+                    backends.append(value)
+                elif option == "--require-backend":
+                    required.add(value)
+                elif option == "--suite":
+                    suite = value
+                elif option == "--repeat":
+                    try:
+                        repeat = int(value)
+                    except ValueError as exc:
+                        raise ValueError("benchmark_repeat_invalid: repeat must be 1, 2, or 3") from exc
+                else:
+                    preset = value
+                continue
+            raise ValueError(f"usage: unknown stealth benchmark arg: {option}")
+        payload, path = run_benchmark(
+            config,
+            backends=backends or ["active"],
+            suite=suite,
+            repeat=repeat,
+            preset=preset,
+            required_backends=required,
+        )
+        failed = bool(payload.get("required_backend_failure"))
+        return RelayAdapterResult(
+            1 if failed else 0,
+            {
+                "schema": SCHEMA,
+                "command": "stealth.benchmark",
+                "status": "failed" if failed else "completed",
+                "result_path": str(path),
+                "artifact_policy": "private-local/no-auto-send",
+                "delivery": "metadata-only",
+                "summary": {
+                    "run_id": payload["run_id"],
+                    "suite_id": payload["suite_id"],
+                    "backends": [
+                        {"identity": item["identity"], "status": item["status"]}
+                        for item in payload["results"]
+                    ],
+                    "required_backend_failure": payload.get("required_backend_failure", []),
+                },
+            },
+        )
+    if action in {"compare", "gate"}:
+        baseline = None
+        candidate = None
+        index = 1
+        while index < len(tokens):
+            option = tokens[index]
+            if option in {"--baseline", "--candidate"}:
+                value, index = _option_value(tokens, index, option)
+                if option == "--baseline":
+                    baseline = value
+                else:
+                    candidate = value
+                continue
+            raise ValueError(f"usage: unknown stealth {action} arg: {option}")
+        if not baseline or not candidate:
+            return _fail(
+                "usage",
+                f"usage: /relay stealth {action} --baseline <path> --candidate <path>",
+                command=f"stealth.{action}",
+            )
+        if action == "compare":
+            comparison = compare_results(read_result(baseline), read_result(candidate))
+            return _ok("stealth.compare", {"status": "completed", "comparison": comparison})
+        gate = gate_results(read_result(baseline), read_result(candidate))
+        return RelayAdapterResult(
+            0 if gate.status == "passed" else 1,
+            {"schema": SCHEMA, "command": "stealth.gate", **gate.as_dict()},
+        )
+    return _fail("usage", f"unknown stealth action: {action}", command="stealth")
 
 
 def relay_text_response(config: RelayConfig, text: str) -> RelayAdapterResult:

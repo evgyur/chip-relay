@@ -138,6 +138,10 @@ scripts/chip-relay task browser-use <run_id> show
 scripts/chip-relay cleanup
 scripts/chip-relay cleanup --execute
 scripts/chip-relay stealth doctor --preset cf-sensitive
+scripts/chip-relay --json stealth benchmark --backend active --suite local --repeat 3
+scripts/chip-relay --json stealth benchmark --backend chromium --backend cloakbrowser --backend browseros --suite local
+scripts/chip-relay --json stealth compare --baseline baseline.json --candidate candidate.json
+scripts/chip-relay --json stealth gate --baseline baseline.json --candidate candidate.json
 scripts/chip-relay artifacts <run_id>
 scripts/chip-relay relay /relay task init "example title smoke"
 
@@ -248,6 +252,16 @@ Init scripts live under `init_scripts/` inside the run. `task init-script add/li
 `doctor webwright` also reports browser executable/root/container/sandbox hints, exact local-vs-nonlocal CDP binding, and a redacted proxy diagnostic from `CHIP_RELAY_PROXY`. `cleanup` is dry-run by default and only operates inside `CHIP_RELAY_BASE_DIR`; `--execute` refuses outside-base and symlink targets. Upload helpers use `CHIP_RELAY_UPLOAD_ALLOWED_DIRS` and reject relative, missing, directory, symlink, or outside-root files.
 
 `stealth doctor` is diagnostic-only. Presets `normal`, `strict`, and `cf-sensitive` check fingerprint consistency and classify public challenge samples as `passed`, `captcha/manual`, `blocked`, `needs_proxy`, or `not_run`; the repo intentionally does not claim guaranteed Cloudflare bypass rates.
+
+### Stealth benchmark and regression gate
+
+`stealth benchmark` turns the same diagnostic contract into reproducible, private-local evidence. The default `local` suite starts an ephemeral HTTP fixture on exact loopback, uses a fresh browser context, records normalized check booleans plus a SHA-256 snapshot, and writes `benchmark.json` with mode `0600` under `${CHIP_RELAY_BASE_DIR}/benchmarks/<run_id>/`. It never stores cookies, headers, bodies, storage state, raw DOM, screenshots, proxy credentials, or raw fingerprint values.
+
+`--backend active` attaches only to an exact loopback CDP URL and never launches or stops the active browser. A backend matrix is sequential. Each requested `chromium`, `cloakbrowser`, or `browseros` run gets a unique port in `18810..18829`, an owner-only ephemeral profile, and exact PID/start-time/process-group ownership. Matrix teardown refuses ambiguous ownership and never uses broad process-name matching. Missing optional backends are reported as `unavailable`; `--require-backend <name>` turns that condition into a non-zero gate.
+
+The opt-in `public-detectors` suite has a fixed HTTPS allowlist and no arbitrary URL argument. Its results are informational and must not gate CI because third-party pages can drift or throttle. `compare` requires the same suite ID/version. `gate` fails closed on lost coverage, a new fingerprint-check failure, a prior `passed` result becoming `blocked`/`captcha/manual`, or a local-fixture median latency above both `baseline + 500 ms` and `3 × baseline`. Public-detector latency remains informational. The gate does not produce a universal stealth score or a bypass claim. `rebrowser-playwright` is not imported or installed.
+
+The relay adapter exposes `/relay stealth benchmark|compare|gate`. Relay responses contain status, run ID, backend status, and private-local artifact paths only; artifact contents are not auto-delivered.
 
 Hardening rules: run IDs cannot contain path components or escape `runs_dir`; browser cookie/profile dumps (`Cookies`, `Local State`, SQLite DBs, HARs, symlinks) fail hygiene; agent command failures return structured gates such as `agent_command_not_found` or `agent_command_timeout`.
 
