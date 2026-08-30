@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import Any
 
 from .agent_loop import run_agent_loop
+from .benchmark import compare_results, gate_results, read_result
+from .benchmark_runner import run_benchmark
 from .browser_use import (
     BrowserUseUnavailable,
     browser_use_doctor,
@@ -180,6 +182,25 @@ def build_parser() -> argparse.ArgumentParser:
     stealth_doctor_parser = stealth_sub.add_parser("doctor")
     stealth_doctor_parser.add_argument("--preset", choices=["normal", "strict", "cf-sensitive"], default="normal")
     stealth_doctor_parser.add_argument("--sample-json")
+    stealth_benchmark = stealth_sub.add_parser("benchmark")
+    stealth_benchmark.add_argument(
+        "--backend",
+        action="append",
+        choices=["active", "chromium", "cloakbrowser", "browseros"],
+        dest="backends",
+    )
+    stealth_benchmark.add_argument("--require-backend", action="append", default=[])
+    stealth_benchmark.add_argument("--suite", choices=["local", "public-detectors"], default="local")
+    stealth_benchmark.add_argument("--repeat", type=int, choices=[1, 2, 3], default=1)
+    stealth_benchmark.add_argument("--preset", choices=["normal", "strict", "cf-sensitive"], default="normal")
+    stealth_benchmark.add_argument("--output")
+    stealth_compare = stealth_sub.add_parser("compare")
+    stealth_compare.add_argument("--baseline", required=True)
+    stealth_compare.add_argument("--candidate", required=True)
+    stealth_gate = stealth_sub.add_parser("gate")
+    stealth_gate.add_argument("--baseline", required=True)
+    stealth_gate.add_argument("--candidate", required=True)
+    stealth_gate.add_argument("--policy", choices=["default"], default="default")
 
     artifacts = sub.add_parser("artifacts")
     artifacts.add_argument("run")
@@ -526,6 +547,31 @@ def cmd_stealth(args: argparse.Namespace) -> int:
         payload = stealth_doctor(preset=args.preset, sample=load_sample(args.sample_json))
         emit(payload, json_mode=args.json_mode)
         return 0
+    if args.stealth_command == "benchmark":
+        payload, path = run_benchmark(
+            load_config(),
+            backends=args.backends or ["active"],
+            suite=args.suite,
+            repeat=args.repeat,
+            preset=args.preset,
+            required_backends=set(args.require_backend),
+            output=args.output,
+        )
+        response = {
+            "status": "failed" if payload.get("required_backend_failure") else "completed",
+            "result_path": str(path),
+            "benchmark": payload,
+        }
+        emit(response, json_mode=args.json_mode)
+        return 1 if payload.get("required_backend_failure") else 0
+    if args.stealth_command == "compare":
+        payload = compare_results(read_result(args.baseline), read_result(args.candidate))
+        emit(payload, json_mode=args.json_mode)
+        return 0
+    if args.stealth_command == "gate":
+        result = gate_results(read_result(args.baseline), read_result(args.candidate))
+        emit(result.as_dict(), json_mode=args.json_mode)
+        return 0 if result.status == "passed" else 1
     raise SystemExit(f"unknown stealth command: {args.stealth_command}")
 
 

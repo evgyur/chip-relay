@@ -116,6 +116,10 @@ scripts/chip-relay task browser-use <run_id> show
 scripts/chip-relay cleanup
 scripts/chip-relay cleanup --execute
 scripts/chip-relay stealth doctor --preset cf-sensitive
+scripts/chip-relay --json stealth benchmark --backend active --suite local --repeat 3
+scripts/chip-relay --json stealth benchmark --backend chromium --backend cloakbrowser --backend browseros --suite local
+scripts/chip-relay --json stealth compare --baseline baseline.json --candidate candidate.json
+scripts/chip-relay --json stealth gate --baseline baseline.json --candidate candidate.json
 scripts/chip-relay artifacts <run_id>
 scripts/chip-relay relay /relay task init "example title smoke"
 scripts/chip-relay task pack <run_id> --name example-title
@@ -139,6 +143,9 @@ Production adapter rules:
 - `cleanup` is dry-run by default and may only remove relay-managed paths inside `CHIP_RELAY_BASE_DIR`.
 - Upload helpers require `CHIP_RELAY_UPLOAD_ALLOWED_DIRS` and reject relative/outside/symlink paths.
 - `stealth doctor` is diagnostic-only: presets report fingerprint/challenge state, not guaranteed Cloudflare bypass.
+- `stealth benchmark` stores owner-only, private-local normalized evidence. `active` only attaches to exact loopback CDP; backend matrices run sequentially on unique non-default ports and ephemeral profiles with exact PID/start-time/process-group teardown. `public-detectors` is opt-in, fixed-allowlist, and informational only.
+- `stealth compare` requires an identical suite ID/version. `stealth gate` fails closed on lost coverage, new fingerprint-check failures, a prior `passed` outcome becoming blocked/manual, or local-fixture median latency above both `baseline + 500 ms` and `3 × baseline`; public-detector latency is informational. There is no aggregate stealth score, arbitrary target URL, or `rebrowser-playwright` dependency.
+- `/relay stealth benchmark|compare|gate` returns metadata and private-local artifact paths only; never auto-send benchmark contents.
 - Authenticated artifacts stay `private-local/no-auto-send` unless a separate policy-cleared export is built.
 - `task context` is the Hermes-native workflow primitive: Hermes is the agent, `/relay` is the browser tool/substrate. It returns editable `scripts/final.py` and `scripts/browser-use.py`, Browser Use plan/execute/show commands, verify/show/artifact commands, current verification state, evidence summary, and metadata-only artifact paths.
 - new task workspaces include `task.brief_schema=chip-relay-agent-brief-v2` in `manifest.json` and matching sections in `task.md`: `agent_instructions`, `success_metrics`, `known_frictions`, and `verification_questions`.
