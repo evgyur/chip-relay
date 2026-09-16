@@ -131,7 +131,7 @@ scripts/chip-relay task captcha <run_id> capture
 scripts/chip-relay task captcha <run_id> act --confidence 0.93 --point 0.25,0.50 --point 0.75,0.50
 scripts/chip-relay task captcha <run_id> show
 scripts/chip-relay task captcha <run_id> resume --timeout 30
-scripts/chip-relay task handoff <run_id> request --kind login --reason-code login_required --timeout 600
+scripts/chip-relay task handoff <run_id> request --kind login --reason-code credential_entry_required --timeout 600
 scripts/chip-relay task handoff <run_id> show
 scripts/chip-relay task audit <run_id> show
 scripts/chip-relay task init-script <run_id> add webdriver --file init/webdriver.js
@@ -258,7 +258,7 @@ This is deliberately not a universal CAPTCHA solver. There is no third-party sol
 
 Browser-native credentialed fetches, Browser Use execution, final-script execution, safe CAPTCHA activation, and visual CAPTCHA actions append redacted metadata to `audit/operations.jsonl`. Every operation has `operation_started` and a terminal `operation_finished` with `succeeded`, `failed`, `cancelled`, or `unknown`. Once dispatch may have happened, the record cannot be marked `failed`; an unfinished start is summarized as `interrupted`. The audit stores no DOM, page text, input values, screenshots, selectors, full URLs, local paths, or raw error messages. It is owner-only, append-only during its retention window, capped at 16 MiB, and available through `task audit <run_id> show`. Fully terminal audit files are truncated after 30 days; pending operations and waiting handoffs are retained.
 
-`task handoff` handles `login`, `two_factor`, `consent`, `confirmation`, `captcha`, and `other` as explicit `waiting`, `resolved`, `cancelled`, or `timed_out` state. Records contain only allowlisted reason codes plus bounded provider/page identifiers; they never contain a password, OTP, user-entered value, or page content. Waiting state is bound to the current execution attempt. See `references/operation-lifecycle.md`.
+`task handoff` handles `login`, `two_factor`, `consent`, `confirmation`, `captcha`, and `other` as explicit `waiting`, `resolved`, `cancelled`, or `timed_out` state. Records contain only allowlisted reason codes plus bounded provider/page identifiers; they never contain a password, OTP, user-entered value, or page content. Waiting state is bound to the current execution attempt. State transitions carry a durable audit outbox: retries reconcile a committed transition before continuing, and idempotent publication preserves `waiting -> terminal` order. CAPTCHA visual-unavailable escalation additionally requires same-attempt evidence of one consumed native allowance and an actual trusted-local capture blocker. See `references/operation-lifecycle.md`.
 
 Init scripts live under `init_scripts/` inside the run. `task init-script add/list` reports only name, size, and SHA-256. The `example-title` Playwright/CDP template loads these scripts with `context.add_init_script(...)` before navigation, which is the right place for webdriver/language/timezone/WebGL consistency patches.
 

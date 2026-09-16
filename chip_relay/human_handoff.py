@@ -31,6 +31,11 @@ STATUSES = {"waiting", "resolved", "cancelled", "timed_out"}
 _ID = re.compile(r"^[0-9a-f]{32}$")
 _PAGE_KEY = re.compile(r"^[0-9a-f]{16}$")
 _TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+_VISUAL_UNAVAILABLE_REASONS = {
+    "playwright_unavailable",
+    "captcha_visual_region_unavailable",
+    "captcha_visual_target_unavailable",
+}
 
 
 class HumanHandoffError(ValueError):
@@ -43,6 +48,10 @@ def _now() -> datetime:
 
 def _time_text(value: datetime) -> str:
     return value.isoformat().replace("+00:00", "Z")
+
+
+def _parse_time(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
 def _open_handoff_dir(run_dir: Path, *, create: bool) -> int:
@@ -93,6 +102,7 @@ def _validate(payload: Any) -> dict[str, Any]:
         "attempt_marker",
         "page_key",
         "provider",
+        "audit_pending",
         "artifact_policy",
     }
     if not isinstance(payload, dict) or set(payload) != expected or payload.get("schema") != SCHEMA:
@@ -101,16 +111,21 @@ def _validate(payload: Any) -> dict[str, Any]:
         raise HumanHandoffError("malformed_handoff_state")
     if payload.get("kind") not in KINDS or payload.get("reason_code") not in REASON_CODES or payload.get("status") not in STATUSES:
         raise HumanHandoffError("malformed_handoff_state")
+    pending = payload.get("audit_pending")
+    if pending is not None and (pending not in STATUSES or pending != payload["status"]):
+        raise HumanHandoffError("malformed_handoff_state")
     for name in ("created_at", "updated_at", "expires_at"):
         if not isinstance(payload.get(name), str) or not _TIMESTAMP.fullmatch(payload[name]):
             raise HumanHandoffError("malformed_handoff_state")
     try:
-        created = datetime.fromisoformat(payload["created_at"].replace("Z", "+00:00"))
-        updated = datetime.fromisoformat(payload["updated_at"].replace("Z", "+00:00"))
-        expires = datetime.fromisoformat(payload["expires_at"].replace("Z", "+00:00"))
+        created = _parse_time(payload["created_at"])
+        updated = _parse_time(payload["updated_at"])
+        expires = _parse_time(payload["expires_at"])
     except ValueError as exc:
         raise HumanHandoffError("malformed_handoff_state") from exc
-    if not created <= updated <= expires:
+    if created > updated or created > expires:
+        raise HumanHandoffError("malformed_handoff_state")
+    if payload["status"] == "waiting" and updated > expires:
         raise HumanHandoffError("malformed_handoff_state")
     page_key = payload.get("page_key")
     if page_key is not None and (not isinstance(page_key, str) or not _PAGE_KEY.fullmatch(page_key)):
@@ -203,6 +218,70 @@ def _context(payload: dict[str, Any]) -> dict[str, Any]:
     return context
 
 
+def _reconcile_audit_locked(run_dir: Path, payload: dict[str, Any]) -> dict[str, Any]:
+    pending = payload.get("audit_pending")
+    if pending is None:
+        return payload
+    record_handoff_event(
+        run_dir,
+        operation_id=payload["handoff_id"],
+        operation=f"handoff.{payload['kind']}",
+        status=pending,
+        context=_context(payload),
+        attempt_marker=payload["attempt_marker"],
+    )
+    payload["audit_pending"] = None
+    _write(run_dir, payload)
+    return payload
+
+
+def _publish_transition_locked(
+    run_dir: Path,
+    payload: dict[str, Any],
+    status: str,
+    *,
+    when: datetime | None = None,
+) -> dict[str, Any]:
+    if status not in STATUSES:
+        raise HumanHandoffError("invalid_handoff_transition")
+    payload["status"] = status
+    payload["updated_at"] = _time_text(when or _now())
+    payload["audit_pending"] = status
+    _write(run_dir, payload)
+    return _reconcile_audit_locked(run_dir, payload)
+
+
+def _terminalize_expired_locked(run_dir: Path, payload: dict[str, Any], now: datetime) -> dict[str, Any]:
+    if payload["status"] == "waiting" and now >= _parse_time(payload["expires_at"]):
+        return _publish_transition_locked(run_dir, payload, "timed_out", when=now)
+    return payload
+
+
+def _validate_captcha_escalation_locked(run_dir: Path, reason_code: str) -> None:
+    from .captcha import CaptchaGateError, load_captcha_state
+
+    try:
+        captcha_state = load_captcha_state(run_dir)
+    except CaptchaGateError as exc:
+        raise HumanHandoffError("captcha_handoff_state_unavailable") from exc
+    if captcha_state is None:
+        raise HumanHandoffError("captcha_handoff_state_unavailable")
+    exhausted = (
+        reason_code == "captcha_automation_exhausted"
+        and captcha_state.get("status") == "human_required"
+        and captcha_state.get("visual_cycle") == 3
+        and captcha_state.get("native_attempts") == 1
+    )
+    visual_unavailable = (
+        reason_code == "captcha_visual_unavailable"
+        and captcha_state.get("status") == "agent_action"
+        and captcha_state.get("native_attempts") == 1
+        and captcha_state.get("visual_unavailable_reason") in _VISUAL_UNAVAILABLE_REASONS
+    )
+    if not exhausted and not visual_unavailable:
+        raise HumanHandoffError("captcha_self_service_not_exhausted")
+
+
 def request_handoff(
     run_dir: Path,
     *,
@@ -216,36 +295,19 @@ def request_handoff(
         raise HumanHandoffError("invalid_handoff_request")
     if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float)) or not math.isfinite(timeout_seconds) or not 30 <= timeout_seconds <= 86_400:
         raise HumanHandoffError("invalid_handoff_timeout")
-    if kind == "captcha":
-        from .captcha import CaptchaGateError, load_captcha_state
-
-        try:
-            captcha_state = load_captcha_state(run_dir)
-        except CaptchaGateError as exc:
-            raise HumanHandoffError("captcha_handoff_state_unavailable") from exc
-        if captcha_state is None:
-            raise HumanHandoffError("captcha_handoff_state_unavailable")
-        exhausted = (
-            reason_code == "captcha_automation_exhausted"
-            and captcha_state.get("status") == "human_required"
-            and captcha_state.get("visual_cycle") == 3
-        )
-        visual_unavailable = (
-            reason_code == "captcha_visual_unavailable"
-            and captcha_state.get("status") in {"agent_action", "human_required"}
-        )
-        if not exhausted and not visual_unavailable:
-            raise HumanHandoffError("captcha_self_service_not_exhausted")
-    cancelled_previous: dict[str, Any] | None = None
     with execution_run_lock(run_dir):
-        existing = _read(run_dir)
-        if existing is not None and existing["status"] == "waiting":
-            if execution_marker(load_manifest(run_dir)) == existing["attempt_marker"]:
-                return _public(existing)
-            existing["status"] = "cancelled"
-            existing["updated_at"] = _time_text(_now())
-            cancelled_previous = dict(existing)
         now = _now()
+        marker = execution_marker(load_manifest(run_dir))
+        existing = _read(run_dir)
+        if existing is not None:
+            existing = _reconcile_audit_locked(run_dir, existing)
+            existing = _terminalize_expired_locked(run_dir, existing, now)
+            if existing["status"] == "waiting":
+                if marker == existing["attempt_marker"]:
+                    return _public(existing)
+                existing = _publish_transition_locked(run_dir, existing, "cancelled", when=now)
+        if kind == "captcha":
+            _validate_captcha_escalation_locked(run_dir, reason_code)
         payload = {
             "schema": SCHEMA,
             "handoff_id": secrets.token_hex(16),
@@ -255,28 +317,15 @@ def request_handoff(
             "created_at": _time_text(now),
             "updated_at": _time_text(now),
             "expires_at": _time_text(now + timedelta(seconds=float(timeout_seconds))),
-            "attempt_marker": execution_marker(load_manifest(run_dir)),
+            "attempt_marker": marker,
             "page_key": page_key,
             "provider": provider,
+            "audit_pending": "waiting",
             "artifact_policy": "redacted-metadata-only/private-local",
         }
         _write(run_dir, payload)
-    if cancelled_previous is not None:
-        record_handoff_event(
-            run_dir,
-            operation_id=cancelled_previous["handoff_id"],
-            operation=f"handoff.{cancelled_previous['kind']}",
-            status="cancelled",
-            context=_context(cancelled_previous),
-        )
-    record_handoff_event(
-        run_dir,
-        operation_id=payload["handoff_id"],
-        operation=f"handoff.{kind}",
-        status="waiting",
-        context=_context(payload),
-    )
-    return _public(payload)
+        payload = _reconcile_audit_locked(run_dir, payload)
+        return _public(payload)
 
 
 def _transition(run_dir: Path, handoff_id: str, status: str) -> dict[str, Any]:
@@ -286,23 +335,19 @@ def _transition(run_dir: Path, handoff_id: str, status: str) -> dict[str, Any]:
         payload = _read(run_dir)
         if payload is None or payload["handoff_id"] != handoff_id:
             raise HumanHandoffError("handoff_not_found")
+        payload = _reconcile_audit_locked(run_dir, payload)
+        now = _now()
+        payload = _terminalize_expired_locked(run_dir, payload, now)
+        if payload["status"] == "timed_out":
+            return _public(payload)
         if payload["status"] != "waiting":
             if payload["status"] == status:
                 return _public(payload)
             raise HumanHandoffError("handoff_not_waiting")
         if execution_marker(load_manifest(run_dir)) != payload["attempt_marker"]:
             raise HumanHandoffError("stale_handoff")
-        payload["status"] = status
-        payload["updated_at"] = _time_text(_now())
-        _write(run_dir, payload)
-    record_handoff_event(
-        run_dir,
-        operation_id=payload["handoff_id"],
-        operation=f"handoff.{payload['kind']}",
-        status=status,
-        context=_context(payload),
-    )
-    return _public(payload)
+        payload = _publish_transition_locked(run_dir, payload, status, when=now)
+        return _public(payload)
 
 
 def resolve_handoff(run_dir: Path, handoff_id: str) -> dict[str, Any]:
@@ -318,27 +363,14 @@ def handoff_summary(run_dir: Path) -> dict[str, Any]:
         payload = _read(run_dir)
         if payload is None:
             return {"status": "none", "human_required": False, "artifact": None}
+        payload = _reconcile_audit_locked(run_dir, payload)
+        now = _now()
+        payload = _terminalize_expired_locked(run_dir, payload, now)
         if execution_marker(load_manifest(run_dir)) != payload["attempt_marker"]:
             public = _public(payload)
             public.update({"status": "stale", "human_required": False})
             return public
-        if payload["status"] == "waiting" and _now() >= datetime.fromisoformat(payload["expires_at"].replace("Z", "+00:00")):
-            payload["status"] = "timed_out"
-            payload["updated_at"] = _time_text(_now())
-            _write(run_dir, payload)
-            timed_out = True
-        else:
-            timed_out = False
-        public = _public(payload)
-    if timed_out:
-        record_handoff_event(
-            run_dir,
-            operation_id=payload["handoff_id"],
-            operation=f"handoff.{payload['kind']}",
-            status="timed_out",
-            context=_context(payload),
-        )
-    return public
+        return _public(payload)
 
 
 def _public(payload: dict[str, Any]) -> dict[str, Any]:

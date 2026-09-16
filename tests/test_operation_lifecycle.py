@@ -4,10 +4,18 @@ from __future__ import annotations
 import json
 import pathlib
 import tempfile
+import threading
 import unittest
+from datetime import datetime, timedelta, timezone
+from typing import Any
+from unittest import mock
 
 from chip_relay.captcha import attempt_safe_captcha_activation, write_captcha_state
-from chip_relay.captcha_visual import apply_captcha_visual_actions, capture_captcha_visual
+from chip_relay.captcha_visual import (
+    CaptchaVisualError,
+    apply_captcha_visual_actions,
+    capture_captcha_visual,
+)
 from chip_relay.config import RelayConfig
 from chip_relay.human_handoff import (
     HumanHandoffError,
@@ -182,6 +190,70 @@ class OperationLifecycleTests(unittest.TestCase):
             self.assertEqual(summary["handoff_counts"]["cancelled"], 1)
             self.assertEqual(summary["handoff_counts"]["waiting"], 2)
 
+    def test_expired_handoffs_terminalize_consistently(self) -> None:
+        base_time = datetime(2026, 9, 16, 12, 0, 0, tzinfo=timezone.utc)
+        for action in ("summary", "resolve", "cancel", "replace"):
+            with self.subTest(action=action), tempfile.TemporaryDirectory() as tmp:
+                run = init_run(make_config(pathlib.Path(tmp)), f"expired handoff {action}")
+                with mock.patch("chip_relay.human_handoff._now", return_value=base_time):
+                    requested = request_handoff(
+                        run.run_dir,
+                        kind="consent",
+                        reason_code="user_consent_required",
+                        timeout_seconds=30,
+                    )
+                expired_at = base_time + timedelta(seconds=31)
+                with mock.patch("chip_relay.human_handoff._now", return_value=expired_at):
+                    if action == "summary":
+                        result = handoff_summary(run.run_dir)
+                    elif action == "resolve":
+                        result = resolve_handoff(run.run_dir, requested["handoff_id"])
+                    elif action == "cancel":
+                        result = cancel_handoff(run.run_dir, requested["handoff_id"])
+                    else:
+                        result = request_handoff(
+                            run.run_dir,
+                            kind="login",
+                            reason_code="credential_entry_required",
+                            timeout_seconds=30,
+                        )
+                if action == "replace":
+                    self.assertEqual(result["status"], "waiting")
+                    self.assertNotEqual(result["handoff_id"], requested["handoff_id"])
+                else:
+                    self.assertEqual(result["status"], "timed_out")
+                self.assertEqual(audit_summary(run.run_dir)["handoff_counts"]["timed_out"], 1)
+
+    def test_handoff_audit_outbox_recovers_without_reordering_or_duplicates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run = init_run(make_config(pathlib.Path(tmp)), "handoff outbox")
+            with mock.patch(
+                "chip_relay.human_handoff.record_handoff_event",
+                side_effect=RuntimeError("audit unavailable"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "audit unavailable"):
+                    request_handoff(
+                        run.run_dir,
+                        kind="consent",
+                        reason_code="user_consent_required",
+                        timeout_seconds=600,
+                    )
+            recovered = request_handoff(
+                run.run_dir,
+                kind="consent",
+                reason_code="user_consent_required",
+                timeout_seconds=600,
+            )
+            resolved = resolve_handoff(run.run_dir, recovered["handoff_id"])
+            self.assertEqual(resolved["status"], "resolved")
+            audit_path = run.run_dir / "audit" / "operations.jsonl"
+            transitions = [
+                json.loads(line)["status"]
+                for line in audit_path.read_text(encoding="utf-8").splitlines()
+                if json.loads(line).get("event") == "human_handoff"
+            ]
+            self.assertEqual(transitions, ["waiting", "resolved"])
+
     def test_relay_projects_handoff_and_audit_metadata_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = pathlib.Path(tmp)
@@ -256,6 +328,63 @@ class OperationLifecycleTests(unittest.TestCase):
                 )
             summary = audit_summary(run.run_dir)
             self.assertEqual(summary["terminal_counts"]["unknown"], 1)
+            retry = attempt_safe_captcha_activation(
+                config,
+                run.run_dir,
+                activator=lambda *_args: (_ for _ in ()).throw(
+                    AssertionError("unknown native activation must not be retried")
+                ),
+            )
+            self.assertEqual(retry["reason_code"], "safe_activation_already_attempted")
+            self.assertEqual(audit_summary(run.run_dir)["terminal_counts"]["unknown"], 1)
+
+    def test_concurrent_native_activation_dispatches_once(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = pathlib.Path(tmp)
+            config = make_config(base)
+            run = init_run(config, "captcha native concurrency")
+            write_captcha_state(run.run_dir, agent_captcha_state())
+            dispatch_count = 0
+            count_lock = threading.Lock()
+
+            def activator(*_args):
+                nonlocal dispatch_count
+                with count_lock:
+                    dispatch_count += 1
+                return {"attempted": False, "reason_code": "activation_candidate_not_unique"}
+
+            def inspector(*_args, **_kwargs):
+                return dict(agent_captcha_state())
+
+            results: list[dict[str, Any]] = []
+            failures: list[BaseException] = []
+
+            def worker() -> None:
+                try:
+                    results.append(
+                        attempt_safe_captcha_activation(
+                            config,
+                            run.run_dir,
+                            activator=activator,
+                            inspector=inspector,
+                        )
+                    )
+                except BaseException as exc:  # pragma: no cover - asserted below
+                    failures.append(exc)
+
+            threads = [threading.Thread(target=worker) for _ in range(2)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=5)
+            self.assertFalse(any(thread.is_alive() for thread in threads))
+            self.assertEqual(failures, [])
+            self.assertEqual(dispatch_count, 1)
+            self.assertEqual(len(results), 2)
+            self.assertEqual(
+                sorted(result["reason_code"] for result in results),
+                ["activation_candidate_not_unique", "safe_activation_already_attempted"],
+            )
 
     def test_captcha_handoff_cannot_skip_self_service(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -270,6 +399,29 @@ class OperationLifecycleTests(unittest.TestCase):
                     reason_code="captcha_automation_exhausted",
                     timeout_seconds=600,
                 )
+            with self.assertRaisesRegex(HumanHandoffError, "captcha_self_service_not_exhausted"):
+                request_handoff(
+                    run.run_dir,
+                    kind="captcha",
+                    reason_code="captcha_visual_unavailable",
+                    timeout_seconds=600,
+                )
+            visual_state = agent_captcha_state()
+            visual_state.update(
+                {
+                    "native_attempts": 1,
+                    "next_action": "capture_and_solve_visually",
+                }
+            )
+            write_captcha_state(run.run_dir, visual_state)
+            with self.assertRaisesRegex(CaptchaVisualError, "playwright_unavailable"):
+                capture_captcha_visual(
+                    config,
+                    run.run_dir,
+                    capturer=lambda *_args: (_ for _ in ()).throw(
+                        CaptchaVisualError("playwright_unavailable")
+                    ),
+                )
             allowed = request_handoff(
                 run.run_dir,
                 kind="captcha",
@@ -283,7 +435,9 @@ class OperationLifecycleTests(unittest.TestCase):
             base = pathlib.Path(tmp)
             config = make_config(base)
             run = init_run(config, "captcha visual exhaustion")
-            write_captcha_state(run.run_dir, agent_captcha_state())
+            initial = agent_captcha_state()
+            initial.update({"native_attempts": 1, "next_action": "capture_and_solve_visually"})
+            write_captcha_state(run.run_dir, initial)
 
             def inspector(*_args, **_kwargs):
                 return dict(agent_captcha_state())

@@ -110,7 +110,7 @@ scripts/chip-relay task captcha <run_id> capture
 scripts/chip-relay task captcha <run_id> act --confidence 0.93 --point 0.25,0.50 --point 0.75,0.50
 scripts/chip-relay task captcha <run_id> show
 scripts/chip-relay task captcha <run_id> resume --timeout 30
-scripts/chip-relay task handoff <run_id> request --kind login --reason-code login_required --timeout 600
+scripts/chip-relay task handoff <run_id> request --kind login --reason-code credential_entry_required --timeout 600
 scripts/chip-relay task handoff <run_id> show
 scripts/chip-relay task audit <run_id> show
 scripts/chip-relay task init-script <run_id> add webdriver --file init/webdriver.js
@@ -143,7 +143,7 @@ Production adapter rules:
 - `task protection ... observer-enable` is explicit `instrumented` mode. It installs a bounded document-start API observer, can affect detectability, and is disabled by default. The current `normal`, `strict`, and `cf-sensitive` preset names are labels only; they do not alter observer behavior.
 - Protection output is diagnostic guidance only: no stealth, proxy rotation, or guaranteed bypass/success claim. The CAPTCHA gate first waits for managed clearance, then tries one uniquely identified provider-owned checkbox activation, then keeps visual solving with Hermes for up to three pinned capture/action cycles. It asks a person only after that budget is exhausted or safe visual work is genuinely unavailable; it never dispatches a third-party solver or injects response tokens.
 - `task captcha ... auto|native|inspect|wait|capture|act|show|resume` supports reCAPTCHA, hCaptcha, Turnstile, and Cloudflare classification. Interactive challenges start as `agent_action`, not `human_required`. `capture` and `act` revalidate the attempt, target, hashed document/loader identity, exact contained region, and live screenshot hash. Each click authorization is single-use and audited; exceptions after dispatch become `unknown`, never `failed`. A third uncleared visual cycle creates a redacted, attempt-bound CAPTCHA handoff automatically. State and challenge artifacts are owner-only, private-local, and never projected through `/relay`.
-- `task handoff` supports `login`, `two_factor`, `consent`, `confirmation`, `captcha`, and `other` with only allowlisted reason codes and states `waiting|resolved|cancelled|timed_out`. It never stores passwords, OTPs, page text, selectors, or user-entered values. A waiting handoff is bound to the current execution attempt and cannot silently survive a new attempt.
+- `task handoff` supports `login`, `two_factor`, `consent`, `confirmation`, `captcha`, and `other` with only allowlisted reason codes and states `waiting|resolved|cancelled|timed_out`. It never stores passwords, OTPs, page text, selectors, or user-entered values. A waiting handoff is bound to the current execution attempt and cannot silently survive a new attempt. Its durable audit outbox reconciles state-before-audit crash windows idempotently and preserves transition order. CAPTCHA visual-unavailable escalation requires same-attempt evidence that native activation was consumed and trusted-local capture actually failed for an allowlisted capability reason.
 - Browser operations write an owner-only append-only audit with `operation_started` and `operation_finished`. Terminal effect states are `succeeded|failed|cancelled|unknown`; a dispatched operation cannot be marked `failed`, and missing terminal records are projected as `interrupted`. Context is allowlisted and redacted to origins/bounded labels; DOM, page text, input values, screenshots, selectors, local paths, and raw errors are excluded. The file is capped at 16 MiB.
 - `task init-script` stores pre-document JavaScript under `init_scripts/` and reports only name/size/SHA-256; `example-title` loads it before navigation.
 - `task browser-use` sends a statically bounded read-only helper program to a trusted, separately pinned Browser Use CLI. Default executions get unique owner-only Browser Harness runtime/tmp/config paths, are bound to Relay's loopback `BU_CDP_URL`, attest `browser_kind=cdp` plus `Browser.getVersion`, and must close both daemon endpoint and process before success. Same-group descendants are killed after every direct CLI exit. Screenshot import requires an explicit `capture_screenshot()` AST call and a structurally valid PNG created in that execution's fresh temp root. Configured custom commands are labeled unattested. This is not a Python sandbox, redirect firewall, DNS-rebinding defense, or protection from a malicious same-UID CLI.
@@ -210,7 +210,7 @@ scripts/chip-relay kill
 
 - `README.md` — full setup and command reference.
 - `references/security.md` — public repo hygiene and CDP exposure rules.
-- `references/captcha-workflow.md` — detect → managed wait / human handoff → clearance → resume contract and privacy boundary.
+- `references/captcha-workflow.md` — detect → managed wait → native activation → agent visual loop → bounded human handoff → clearance/resume contract.
 - `references/operation-lifecycle.md` — effect-state, redacted audit, retry, and human-handoff contract.
 - `docs/protection-diagnostics-sources.md` — clean-room provenance, source, privacy, and no-bypass contract.
 - `templates/chip-relay.env.example` — configuration template.

@@ -110,7 +110,12 @@ def _sanitize_context(raw: dict[str, Any] | None) -> dict[str, Any]:
     return result
 
 
-def _append_event(run_dir: Path, event: dict[str, Any]) -> None:
+def _append_event(
+    run_dir: Path,
+    event: dict[str, Any],
+    *,
+    dedupe: tuple[str, str, str] | None = None,
+) -> None:
     encoded = (json.dumps(event, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
     if len(encoded) > MAX_EVENT_BYTES:
         raise OperationAuditError("operation_audit_event_too_large")
@@ -124,6 +129,29 @@ def _append_event(run_dir: Path, event: dict[str, Any]) -> None:
             raise OperationAuditError("unsafe_operation_audit_path")
         os.fchmod(file_fd, 0o600)
         fcntl.flock(file_fd, fcntl.LOCK_EX)
+        if dedupe is not None:
+            os.lseek(file_fd, 0, os.SEEK_SET)
+            current = bytearray()
+            while len(current) <= MAX_AUDIT_BYTES:
+                chunk = os.read(file_fd, min(64 * 1024, MAX_AUDIT_BYTES + 1 - len(current)))
+                if not chunk:
+                    break
+                current.extend(chunk)
+            if len(current) > MAX_AUDIT_BYTES:
+                raise OperationAuditError("operation_audit_too_large")
+            for line in bytes(current).splitlines():
+                try:
+                    existing = json.loads(line.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    raise OperationAuditError("malformed_operation_audit") from exc
+                if (
+                    isinstance(existing, dict)
+                    and existing.get("event") == dedupe[0]
+                    and existing.get("operation_id") == dedupe[1]
+                    and existing.get("status") == dedupe[2]
+                ):
+                    return
+            os.lseek(file_fd, 0, os.SEEK_END)
         if os.fstat(file_fd).st_size + len(encoded) > MAX_AUDIT_BYTES:
             raise OperationAuditError("operation_audit_full")
         view = memoryview(encoded)
@@ -148,15 +176,35 @@ def _append_event(run_dir: Path, event: dict[str, Any]) -> None:
         os.close(directory_fd)
 
 
-def _base_event(run_dir: Path, *, event_type: str, operation_id: str, operation: str, effect_class: str) -> dict[str, Any]:
+def _base_event(
+    run_dir: Path,
+    *,
+    event_type: str,
+    operation_id: str,
+    operation: str,
+    effect_class: str,
+    attempt_marker: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     if event_type not in _EVENT_TYPES or not _OPERATION_ID.fullmatch(operation_id):
         raise OperationAuditError("invalid_operation_audit_event")
     if not _OPERATION.fullmatch(operation) or effect_class not in _EFFECT_CLASSES:
         raise OperationAuditError("invalid_operation_audit_event")
-    try:
-        marker = execution_marker(load_manifest(run_dir))
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
-        raise OperationAuditError("operation_audit_attempt_unavailable") from exc
+    if attempt_marker is None:
+        try:
+            marker = execution_marker(load_manifest(run_dir))
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            raise OperationAuditError("operation_audit_attempt_unavailable") from exc
+    else:
+        marker = dict(attempt_marker)
+        if (
+            set(marker) != {"generation", "attempt_id"}
+            or isinstance(marker.get("generation"), bool)
+            or not isinstance(marker.get("generation"), int)
+            or marker["generation"] < 0
+            or not isinstance(marker.get("attempt_id"), str)
+            or not marker["attempt_id"]
+        ):
+            raise OperationAuditError("operation_audit_attempt_unavailable")
     return {
         "schema": SCHEMA,
         "event": event_type,
@@ -245,6 +293,7 @@ def record_handoff_event(
     operation: str,
     status: str,
     context: dict[str, Any] | None = None,
+    attempt_marker: dict[str, Any] | None = None,
 ) -> None:
     if status not in {"waiting", "resolved", "cancelled", "timed_out"}:
         raise OperationAuditError("invalid_handoff_status")
@@ -254,9 +303,14 @@ def record_handoff_event(
         operation_id=operation_id,
         operation=operation,
         effect_class="browser-state",
+        attempt_marker=attempt_marker,
     )
     event.update({"status": status, "context": _sanitize_context(context)})
-    _append_event(run_dir, event)
+    _append_event(
+        run_dir,
+        event,
+        dedupe=("human_handoff", operation_id, status),
+    )
 
 
 def _validate_loaded_event(item: Any) -> dict[str, Any]:

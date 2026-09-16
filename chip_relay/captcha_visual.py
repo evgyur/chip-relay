@@ -469,7 +469,30 @@ def _capture_captcha_visual_locked(
         _write_captcha_state_locked(run_dir, budget_state, expected_attempt_marker=marker)
     except CaptchaGateError as exc:
         raise CaptchaVisualError("captcha_visual_budget_unavailable") from exc
-    image, raw_bounds, document_key = (capturer or _capture_with_playwright)(config, page_key)
+    try:
+        image, raw_bounds, document_key = (capturer or _capture_with_playwright)(config, page_key)
+    except CaptchaVisualError as exc:
+        reason = str(exc).split(":", 1)[0]
+        if reason in {
+            "playwright_unavailable",
+            "captcha_visual_region_unavailable",
+            "captcha_visual_target_unavailable",
+        } and state.get("native_attempts") == 1:
+            unavailable = dict(state)
+            unavailable.update(
+                {
+                    "status": "agent_action",
+                    "next_action": "capture_and_solve_visually",
+                    "human_handoff": False,
+                    "visual_cycle": cycle,
+                    "visual_unavailable_reason": reason,
+                }
+            )
+            try:
+                _write_captcha_state_locked(run_dir, unavailable, expected_attempt_marker=marker)
+            except CaptchaGateError as state_exc:
+                raise CaptchaVisualError("captcha_visual_gate_unavailable") from state_exc
+        raise
     bounds = _safe_bounds(raw_bounds)
     if not isinstance(document_key, str) or not _DOCUMENT_KEY.fullmatch(document_key):
         raise CaptchaVisualError("captcha_document_identity_unavailable")
@@ -603,6 +626,7 @@ def _apply_captcha_visual_actions_locked(
         if _attempt_marker(run_dir) != marker:
             raise CaptchaVisualError("captcha_visual_stale")
         result = dict(inspected)
+        result["native_attempts"] = state.get("native_attempts", 0)
         if inspected.get("status") == "clear":
             result.update(
                 {

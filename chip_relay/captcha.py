@@ -49,6 +49,7 @@ _STATE_PAYLOAD_KEYS = {
     "page_key",
     "visual_cycle",
     "native_attempts",
+    "visual_unavailable_reason",
 }
 _STATE_RECORD_KEYS = _STATE_PAYLOAD_KEYS | {"schema", "attempt_marker", "artifact_policy"}
 _STATE_TRANSITIONS = {
@@ -318,6 +319,12 @@ def inspect_captcha_gate(
             previous = None
         if previous is not None and previous.get("page_key") == selected_key:
             decision["native_attempts"] = min(1, _bounded_int(previous.get("native_attempts")))
+            if previous.get("visual_unavailable_reason") in {
+                "playwright_unavailable",
+                "captcha_visual_region_unavailable",
+                "captcha_visual_target_unavailable",
+            }:
+                decision["visual_unavailable_reason"] = previous["visual_unavailable_reason"]
         write_captcha_state(run_dir, decision, expected_attempt_marker=attempt_marker)
     return decision
 
@@ -403,6 +410,13 @@ def _validate_state_payload(payload: dict[str, Any]) -> None:
     if native_attempts is not None and (
         isinstance(native_attempts, bool) or not isinstance(native_attempts, int) or not 0 <= native_attempts <= 1
     ):
+        raise CaptchaGateError("malformed_captcha_state")
+    visual_unavailable_reason = payload.get("visual_unavailable_reason")
+    if visual_unavailable_reason is not None and visual_unavailable_reason not in {
+        "playwright_unavailable",
+        "captcha_visual_region_unavailable",
+        "captcha_visual_target_unavailable",
+    }:
         raise CaptchaGateError("malformed_captcha_state")
     if "elapsed_seconds" in payload:
         elapsed = payload["elapsed_seconds"]
@@ -721,6 +735,22 @@ def attempt_safe_captcha_activation(
     activator: Callable[[RelayConfig, str, str | None], dict[str, Any]] = _activate_with_playwright,
     inspector: Callable[..., dict[str, Any]] = inspect_captcha_gate,
 ) -> dict[str, Any]:
+    with execution_run_lock(run_dir):
+        return _attempt_safe_captcha_activation_locked(
+            config,
+            run_dir,
+            activator=activator,
+            inspector=inspector,
+        )
+
+
+def _attempt_safe_captcha_activation_locked(
+    config: RelayConfig,
+    run_dir: Path,
+    *,
+    activator: Callable[[RelayConfig, str, str | None], dict[str, Any]],
+    inspector: Callable[..., dict[str, Any]],
+) -> dict[str, Any]:
     state = load_captcha_state(run_dir)
     if state is None or state.get("status") not in {"agent_action", "managed_wait"}:
         raise CaptchaGateError("captcha_native_activation_not_ready")
@@ -734,7 +764,11 @@ def attempt_safe_captcha_activation(
                 "native_activation": "already_attempted",
             }
         )
-        write_captcha_state(run_dir, result)
+        _write_captcha_state_locked(
+            run_dir,
+            result,
+            expected_attempt_marker=_current_attempt_marker(run_dir),
+        )
         return {
             "status": "agent_action",
             "attempted": False,
@@ -753,11 +787,24 @@ def attempt_safe_captcha_activation(
         context={"page_key": page_key, "provider": state.get("provider") or "unknown"},
     )
     try:
+        marker = _current_attempt_marker(run_dir)
+        consumed = dict(state)
+        consumed.update(
+            {
+                "status": "agent_action",
+                "next_action": "capture_and_solve_visually",
+                "human_handoff": False,
+                "native_attempts": 1,
+            }
+        )
+        _write_captcha_state_locked(run_dir, consumed, expected_attempt_marker=marker)
         operation.mark_dispatched()
         activation = activator(config, page_key, state.get("provider"))
         if not isinstance(activation, dict) or type(activation.get("attempted")) is not bool:
             raise CaptchaGateError("captcha_native_activation_invalid_result")
         inspected = inspector(config, run_dir, page_index=-1, page_key=page_key, persist=False)
+        if _current_attempt_marker(run_dir) != marker:
+            raise CaptchaGateError("captcha_attempt_changed")
         result = dict(inspected)
         if inspected.get("status") == "clear":
             result.update({"status": "cleared", "next_action": "rerun_or_continue_task", "human_handoff": False})
@@ -766,7 +813,7 @@ def attempt_safe_captcha_activation(
         else:
             result.update({"status": "managed_wait", "next_action": "wait_for_browser_native_clearance", "human_handoff": False})
         result["native_attempts"] = 1
-        write_captcha_state(run_dir, result)
+        _write_captcha_state_locked(run_dir, result, expected_attempt_marker=marker)
         operation.finish(
             "succeeded",
             context={"page_key": page_key, "provider": state.get("provider") or "unknown"},
