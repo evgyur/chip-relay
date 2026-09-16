@@ -10,7 +10,11 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from unittest import mock
 
-from chip_relay.captcha import attempt_safe_captcha_activation, write_captcha_state
+from chip_relay.captcha import (
+    attempt_safe_captcha_activation,
+    wait_for_captcha_clearance,
+    write_captcha_state,
+)
 from chip_relay.captcha_visual import (
     CaptchaVisualError,
     apply_captcha_visual_actions,
@@ -385,6 +389,80 @@ class OperationLifecycleTests(unittest.TestCase):
                 sorted(result["reason_code"] for result in results),
                 ["activation_candidate_not_unique", "safe_activation_already_attempted"],
             )
+
+    def test_stale_wait_observation_cannot_restore_native_allowance(self) -> None:
+        for outcome in ("succeeded", "unknown"):
+            with self.subTest(outcome=outcome), tempfile.TemporaryDirectory() as tmp:
+                base = pathlib.Path(tmp)
+                config = make_config(base)
+                run = init_run(config, f"captcha stale wait {outcome}")
+                write_captcha_state(run.run_dir, agent_captcha_state())
+                dispatch_count = 0
+
+                def activator(*_args):
+                    nonlocal dispatch_count
+                    dispatch_count += 1
+                    if outcome == "unknown":
+                        raise RuntimeError("post-dispatch-timeout")
+                    return {"attempted": False, "reason_code": "activation_candidate_not_unique"}
+
+                def stale_inspector(*_args, **_kwargs):
+                    try:
+                        attempt_safe_captcha_activation(
+                            config,
+                            run.run_dir,
+                            activator=activator,
+                            inspector=lambda *_args, **_kwargs: dict(agent_captcha_state()),
+                        )
+                    except RuntimeError:
+                        pass
+                    return dict(agent_captcha_state())
+
+                waited = wait_for_captcha_clearance(
+                    config,
+                    run.run_dir,
+                    timeout=0,
+                    inspector=stale_inspector,
+                )
+                self.assertEqual(waited["status"], "agent_action")
+                retry = attempt_safe_captcha_activation(
+                    config,
+                    run.run_dir,
+                    activator=activator,
+                )
+                self.assertEqual(retry["reason_code"], "safe_activation_already_attempted")
+                self.assertEqual(dispatch_count, 1)
+                if outcome == "unknown":
+                    self.assertEqual(audit_summary(run.run_dir)["terminal_counts"]["unknown"], 1)
+
+    def test_stale_inspect_commit_cannot_restore_native_allowance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = pathlib.Path(tmp)
+            config = make_config(base)
+            run = init_run(config, "captcha stale inspect")
+            stale_observation = agent_captcha_state()
+            write_captcha_state(run.run_dir, stale_observation)
+            dispatch_count = 0
+
+            def activator(*_args):
+                nonlocal dispatch_count
+                dispatch_count += 1
+                return {"attempted": False, "reason_code": "activation_candidate_not_unique"}
+
+            attempt_safe_captcha_activation(
+                config,
+                run.run_dir,
+                activator=activator,
+                inspector=lambda *_args, **_kwargs: dict(agent_captcha_state()),
+            )
+            write_captcha_state(run.run_dir, stale_observation)
+            retry = attempt_safe_captcha_activation(
+                config,
+                run.run_dir,
+                activator=activator,
+            )
+            self.assertEqual(retry["reason_code"], "safe_activation_already_attempted")
+            self.assertEqual(dispatch_count, 1)
 
     def test_captcha_handoff_cannot_skip_self_service(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

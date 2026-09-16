@@ -445,6 +445,30 @@ def _write_captcha_state_locked(
     if expected_attempt_marker is not None and current_marker != expected_attempt_marker:
         raise CaptchaGateError("captcha_attempt_changed")
     manifest_cycle = _current_visual_cycle(run_dir, current_marker)
+    try:
+        existing = load_captcha_state(run_dir)
+    except CaptchaGateError as exc:
+        if str(exc) not in {"stale_captcha_state", "malformed_captcha_state"}:
+            raise
+        existing = None
+    if (
+        existing is not None
+        and existing.get("page_key") is not None
+        and existing.get("page_key") == safe.get("page_key")
+    ):
+        safe["native_attempts"] = max(
+            _bounded_int(existing.get("native_attempts"), maximum=1),
+            _bounded_int(safe.get("native_attempts"), maximum=1),
+        )
+        if (
+            "visual_unavailable_reason" not in safe
+            and existing.get("visual_unavailable_reason") in {
+                "playwright_unavailable",
+                "captcha_visual_region_unavailable",
+                "captcha_visual_target_unavailable",
+            }
+        ):
+            safe["visual_unavailable_reason"] = existing["visual_unavailable_reason"]
     if "visual_cycle" in safe and safe["visual_cycle"] != manifest_cycle:
         raise CaptchaGateError("captcha_visual_budget_mismatch")
     safe["visual_cycle"] = manifest_cycle
