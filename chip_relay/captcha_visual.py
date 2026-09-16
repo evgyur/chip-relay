@@ -7,7 +7,6 @@ import os
 import re
 import secrets
 import stat
-import time
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -19,7 +18,9 @@ from .captcha import (
     load_captcha_state,
 )
 from .config import RelayConfig
+from .human_handoff import HumanHandoffError, request_handoff
 from .network import utc_now_text
+from .operation_audit import begin_operation
 from .protection import _open_protection_dir_fd, _read_bounded_fd, _write_all
 from .workspace import execution_marker, execution_run_lock, load_manifest, update_manifest
 
@@ -303,8 +304,20 @@ def _live_region(raw: Any) -> tuple[dict[str, float], dict[str, float]]:
     viewport_height = raw.get("viewport_height")
     clip_x = raw.get("clip_x")
     clip_y = raw.get("clip_y")
-    values = (viewport_width, viewport_height, clip_x, clip_y)
-    if any(isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) for value in values):
+    if (
+        isinstance(viewport_width, bool)
+        or not isinstance(viewport_width, (int, float))
+        or not math.isfinite(viewport_width)
+        or isinstance(viewport_height, bool)
+        or not isinstance(viewport_height, (int, float))
+        or not math.isfinite(viewport_height)
+        or isinstance(clip_x, bool)
+        or not isinstance(clip_x, (int, float))
+        or not math.isfinite(clip_x)
+        or isinstance(clip_y, bool)
+        or not isinstance(clip_y, (int, float))
+        or not math.isfinite(clip_y)
+    ):
         raise CaptchaVisualError("captcha_visual_region_unavailable")
     viewport_width = float(viewport_width)
     viewport_height = float(viewport_height)
@@ -437,7 +450,7 @@ def _capture_captcha_visual_locked(
         state = load_captcha_state(run_dir)
     except CaptchaGateError as exc:
         raise CaptchaVisualError("captcha_visual_gate_unavailable") from exc
-    if state is None or state.get("status") != "human_required":
+    if state is None or state.get("status") not in {"agent_action", "human_required"}:
         raise CaptchaVisualError("captcha_visual_gate_not_interactive")
     page_key = state.get("page_key")
     if not isinstance(page_key, str) or not _PAGE_KEY.fullmatch(page_key):
@@ -506,7 +519,7 @@ def apply_captcha_visual_actions(
     inspector: Callable[..., dict[str, Any]] = inspect_captcha_gate,
 ) -> dict[str, Any]:
     with execution_run_lock(run_dir):
-        return _apply_captcha_visual_actions_locked(
+        result = _apply_captcha_visual_actions_locked(
             config,
             run_dir,
             points,
@@ -514,6 +527,19 @@ def apply_captcha_visual_actions(
             actioner=actioner,
             inspector=inspector,
         )
+    if result.get("status") == "human_required":
+        try:
+            result["handoff"] = request_handoff(
+                run_dir,
+                kind="captcha",
+                reason_code="captcha_automation_exhausted",
+                page_key=result.get("page_key"),
+                provider=result.get("provider"),
+            )
+        except HumanHandoffError as exc:
+            if str(exc) != "stale_waiting_handoff":
+                raise
+    return result
 
 
 def _apply_captcha_visual_actions_locked(
@@ -547,10 +573,22 @@ def _apply_captcha_visual_actions_locked(
     except CaptchaGateError as exc:
         raise CaptchaVisualError("captcha_visual_gate_unavailable") from exc
     page_key = visual["page_key"]
-    if state is None or state.get("page_key") != page_key or state.get("status") != "human_required":
+    if state is None or state.get("page_key") != page_key or state.get("status") not in {"agent_action", "human_required"}:
         raise CaptchaVisualError("captcha_visual_stale")
+    operation = begin_operation(
+        run_dir,
+        "captcha.visual_action",
+        effect_class="browser-state",
+        context={
+            "page_key": page_key,
+            "provider": state.get("provider") or "unknown",
+            "action_count": len(normalized),
+            "visual_cycle": visual["cycle"],
+        },
+    )
     _consume_visual_authorization(run_dir, visual)
     try:
+        operation.mark_dispatched()
         (actioner or _apply_with_playwright)(
             config,
             page_key,
@@ -573,16 +611,43 @@ def _apply_captcha_visual_actions_locked(
                     "human_handoff": False,
                 }
             )
+        elif visual["cycle"] >= MAX_VISUAL_CYCLES:
+            result.update(
+                {
+                    "status": "human_required",
+                    "next_action": "solve_in_visible_trusted_browser_then_resume",
+                    "human_handoff": True,
+                }
+            )
+        else:
+            result.update(
+                {
+                    "status": "agent_action",
+                    "next_action": "retry_visual_capture",
+                    "human_handoff": False,
+                }
+            )
         _write_captcha_state_locked(run_dir, result, expected_attempt_marker=marker)
     except Exception:
         try:
             _write_visual_authorization_status(run_dir, visual, "uncertain")
         except CaptchaVisualError:
             pass
+        if not operation.finished:
+            operation.fail_from_exception("captcha_visual_action_error")
         raise
     _write_visual_authorization_status(run_dir, visual, "consumed")
     result["action_count"] = len(normalized)
     result["visual_cycle"] = visual["cycle"]
     result["confidence"] = round(float(confidence), 4)
     result["artifact_policy"] = "private-local/no-auto-send"
+    operation.finish(
+        "succeeded",
+        context={
+            "page_key": page_key,
+            "provider": state.get("provider") or "unknown",
+            "action_count": len(normalized),
+            "visual_cycle": visual["cycle"],
+        },
+    )
     return result

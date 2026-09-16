@@ -124,11 +124,16 @@ scripts/chip-relay task protection <run_id> diagnose
 scripts/chip-relay task protection <run_id> show
 scripts/chip-relay task protection <run_id> observer-enable --preset normal
 scripts/chip-relay task captcha <run_id> inspect
+scripts/chip-relay task captcha <run_id> auto --timeout 30
+scripts/chip-relay task captcha <run_id> native
 scripts/chip-relay task captcha <run_id> wait --timeout 120
 scripts/chip-relay task captcha <run_id> capture
 scripts/chip-relay task captcha <run_id> act --confidence 0.93 --point 0.25,0.50 --point 0.75,0.50
 scripts/chip-relay task captcha <run_id> show
 scripts/chip-relay task captcha <run_id> resume --timeout 30
+scripts/chip-relay task handoff <run_id> request --kind login --reason-code login_required --timeout 600
+scripts/chip-relay task handoff <run_id> show
+scripts/chip-relay task audit <run_id> show
 scripts/chip-relay task init-script <run_id> add webdriver --file init/webdriver.js
 scripts/chip-relay task init-script <run_id> list
 scripts/chip-relay task browser-use <run_id> doctor
@@ -166,11 +171,13 @@ Default runtime paths:
 ├── traces/
 ├── results/
 ├── protection/
+├── audit/
+├── handoff/
 ├── agent/
 └── verification/
 ```
 
-`task run` executes `scripts/final.py` once, captures `logs/run.log`, injects `CHIP_RELAY_CDP_URL`, and marks the manifest `ran` or `failed`. Run and verify executions are serialized by a run-scoped lock. On Linux, a non-replaceable abstract Unix-socket authority backs the pinned-descriptor lock files, so unlink/recreation cannot bypass serialization. Execution IDs are monotonic; malformed execution state fails closed, while only a manifest with no `execution` record is treated as legacy generation zero.
+`task run` executes `scripts/final.py` once, captures `logs/run.log`, injects `CHIP_RELAY_CDP_URL`, and marks the manifest `ran` or `failed`. It also returns `effect_state`: success is `succeeded`, while any non-zero exit or timeout after process dispatch is `unknown` because the script may already have changed browser or business state. Unknown effects must be reconciled before retry. Run and verify executions are serialized by a run-scoped lock. On Linux, a non-replaceable abstract Unix-socket authority backs the pinned-descriptor lock files, so unlink/recreation cannot bypass serialization. Execution IDs are monotonic; malformed execution state fails closed, while only a manifest with no `execution` record is treated as legacy generation zero.
 
 `task context` is the Hermes-native workflow primitive. It returns `chip-relay-hermes-workflow-context-v1`: task, `task_brief`, rail, editable files, verify/show/artifacts commands, current verification state, evidence summary, and metadata-only artifact paths. This is the preferred integration when Hermes itself is the agent: Hermes reads the brief, edits `scripts/final.py`, runs `task verify`, reads structured feedback/evidence, and never sends artifact contents to chat by default. `--write` stores the same context at `agent/hermes-context.json` for repeatable handoff.
 
@@ -239,13 +246,19 @@ Blocker guidance is explicitly hypothetical and distinguishes manual CAPTCHA, ra
 
 ### CAPTCHA gate and resume
 
-`task captcha` turns CAPTCHA from an opaque task failure into a bounded state machine. It inspects the selected live CDP page using boolean/count-only metadata, recognizes reCAPTCHA, hCaptcha, Turnstile, and Cloudflare managed challenges, and returns `clear`, `managed_wait`, or `human_required`.
+`task captcha` turns CAPTCHA from an opaque task failure into a bounded state machine. It inspects the selected live CDP page using boolean/count-only metadata, recognizes reCAPTCHA, hCaptcha, Turnstile, and Cloudflare managed challenges, and returns `clear`, `managed_wait`, `agent_action`, or—only after the self-service budget is exhausted—`human_required`.
 
-For browser-native managed challenges, `wait` observes the existing browser until clearance and returns `cleared`; it does not click or inject anything. The gate rejects malformed/contradictory probes, treats a pending hidden response field as `managed_wait`, and pins the original Chromium target across `inspect`/`resume`, so a new tab cannot cause false clearance. Cloudflare pages that also expose Turnstile receive a managed-wait window first, then become a human handoff if a visible widget remains at timeout.
+`auto` is the default agent path. It first observes managed clearance. If an interactive provider widget remains, Relay may click one uniquely identified provider-owned checkbox in a provider-owned frame and then waits again. Ambiguous candidates are never clicked, and native activation is attempted at most once per task attempt. No token is injected.
 
-For an interactive challenge, `capture` is enabled only after `human_required` and takes a private-local screenshot of only the fully visible detected challenge region. A trusted local vision agent or operator can inspect that image and pass normalized challenge-relative points to `act`. Immediately before clicking, relay revalidates the Chromium document/loader identity, exact contained region, and live screenshot hash; it marks the authorization `applying` before any click, ends it as `consumed` only after a fully observed result or `uncertain` after an exception, clicks only the pinned page/document/region, re-inspects the gate, and returns `cleared` only when page metadata confirms clearance. Capture/action calls are serialized under the run lock. Region dimensions and pixel area are capped before screenshot allocation. The screenshot and its integrity-bound state are owner-only `0600`, attempt-bound, target- and document-pinned, and never exposed by the `/relay` response.
+If native activation is unavailable or does not clear the challenge, status remains `agent_action`: Hermes must run `capture`, inspect the private-local challenge image with trusted local vision, and pass high-confidence normalized points to `act`. Relay revalidates the attempt, Chromium target, document/loader identity, exact contained region, and live screenshot hash immediately before clicking. The authorization becomes single-use before dispatch; an exception after dispatch is `unknown`, never a safe failure. An uncleared result remains with Hermes for up to three visual cycles. Only the third uncleared cycle creates a redacted `captcha` handoff in `waiting` state for a trusted person.
 
 This is deliberately not a universal CAPTCHA solver. There is no third-party solver dispatch, response-token injection, unattended answer-extraction service, or guaranteed bypass claim. The trusted local visual-assist loop is bounded to 12 points per capture and fails closed if the page, region, attempt, or screenshot changes. See `references/captcha-workflow.md`.
+
+### Operation lifecycle and human handoff
+
+Browser-native credentialed fetches, Browser Use execution, final-script execution, safe CAPTCHA activation, and visual CAPTCHA actions append redacted metadata to `audit/operations.jsonl`. Every operation has `operation_started` and a terminal `operation_finished` with `succeeded`, `failed`, `cancelled`, or `unknown`. Once dispatch may have happened, the record cannot be marked `failed`; an unfinished start is summarized as `interrupted`. The audit stores no DOM, page text, input values, screenshots, selectors, full URLs, local paths, or raw error messages. It is owner-only, append-only during its retention window, capped at 16 MiB, and available through `task audit <run_id> show`. Fully terminal audit files are truncated after 30 days; pending operations and waiting handoffs are retained.
+
+`task handoff` handles `login`, `two_factor`, `consent`, `confirmation`, `captcha`, and `other` as explicit `waiting`, `resolved`, `cancelled`, or `timed_out` state. Records contain only allowlisted reason codes plus bounded provider/page identifiers; they never contain a password, OTP, user-entered value, or page content. Waiting state is bound to the current execution attempt. See `references/operation-lifecycle.md`.
 
 Init scripts live under `init_scripts/` inside the run. `task init-script add/list` reports only name, size, and SHA-256. The `example-title` Playwright/CDP template loads these scripts with `context.add_init_script(...)` before navigation, which is the right place for webdriver/language/timezone/WebGL consistency patches.
 

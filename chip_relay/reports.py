@@ -8,8 +8,10 @@ from urllib.parse import urlparse
 from .browser_use import browser_use_summary
 from .captcha import captcha_summary
 from .config import RelayConfig
+from .human_handoff import handoff_summary
 from .init_scripts import list_init_scripts
 from .network import load_observations
+from .operation_audit import audit_summary
 from .protection import protection_summary
 from .workspace import load_manifest
 
@@ -38,6 +40,8 @@ def artifact_metadata(run_dir: Path) -> list[dict[str, Any]]:
     artifacts: list[dict[str, Any]] = []
     for rel_root, kind in (
         ("agent", "agent"),
+        ("audit", "redacted-operation-audit"),
+        ("handoff", "redacted-human-handoff"),
         ("init_scripts", "init_script"),
         ("logs", "log"),
         ("network", "network"),
@@ -115,6 +119,8 @@ def evidence_report(config: RelayConfig, run_dir: Path) -> dict[str, Any]:
         },
         "protection": protection_summary(run_dir),
         "captcha": captcha_summary(run_dir),
+        "human_handoff": handoff_summary(run_dir),
+        "operation_audit": audit_summary(run_dir),
         "browser_use": browser_use_summary(run_dir),
         "artifact_policy": ARTIFACT_POLICY,
         "delivery": "metadata-only",

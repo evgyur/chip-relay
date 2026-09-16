@@ -13,6 +13,7 @@ from typing import Any, Callable
 
 from .config import RelayConfig
 from .network import redact_url, utc_now_text
+from .operation_audit import begin_operation
 from .protection import _open_protection_dir_fd, _read_bounded_fd, _write_all
 from .workspace import execution_marker, execution_run_lock, load_manifest
 
@@ -47,11 +48,20 @@ _STATE_PAYLOAD_KEYS = {
     "page_count",
     "page_key",
     "visual_cycle",
+    "native_attempts",
 }
 _STATE_RECORD_KEYS = _STATE_PAYLOAD_KEYS | {"schema", "attempt_marker", "artifact_policy"}
 _STATE_TRANSITIONS = {
     "clear": ({"continue_task"}, False),
     "managed_wait": ({"wait_for_browser_native_clearance"}, False),
+    "agent_action": (
+        {
+            "attempt_safe_native_activation",
+            "capture_and_solve_visually",
+            "retry_visual_capture",
+        },
+        False,
+    ),
     "human_required": (
         {
             "solve_in_visible_trusted_browser_then_resume",
@@ -146,8 +156,8 @@ def classify_captcha_probe(raw: Any) -> dict[str, Any]:
         state = "managed_wait"
         next_action = "wait_for_browser_native_clearance"
     else:
-        state = "human_required"
-        next_action = "solve_in_visible_trusted_browser_then_resume"
+        state = "agent_action"
+        next_action = "attempt_safe_native_activation"
 
     return {
         "schema": SCHEMA,
@@ -159,8 +169,8 @@ def classify_captcha_probe(raw: Any) -> dict[str, Any]:
         "response_field_count": response_fields,
         "token_present": token_present,
         "next_action": next_action,
-        "automation": "browser-native-wait-only",
-        "human_handoff": state == "human_required",
+        "automation": "browser-native-then-agent-visual",
+        "human_handoff": False,
         "claim_policy": "best-effort/no-guaranteed-solve",
         "forbidden": ["token injection", "automatic answer extraction", "solver-service dispatch"],
     }
@@ -302,6 +312,12 @@ def inspect_captcha_gate(
         }
     )
     if persist:
+        try:
+            previous = load_captcha_state(run_dir)
+        except CaptchaGateError:
+            previous = None
+        if previous is not None and previous.get("page_key") == selected_key:
+            decision["native_attempts"] = min(1, _bounded_int(previous.get("native_attempts")))
         write_captcha_state(run_dir, decision, expected_attempt_marker=attempt_marker)
     return decision
 
@@ -383,6 +399,11 @@ def _validate_state_payload(payload: dict[str, Any]) -> None:
     visual_cycle = payload.get("visual_cycle")
     if isinstance(visual_cycle, bool) or not isinstance(visual_cycle, int) or not 0 <= visual_cycle <= 3:
         raise CaptchaGateError("malformed_captcha_state")
+    native_attempts = payload.get("native_attempts")
+    if native_attempts is not None and (
+        isinstance(native_attempts, bool) or not isinstance(native_attempts, int) or not 0 <= native_attempts <= 1
+    ):
+        raise CaptchaGateError("malformed_captcha_state")
     if "elapsed_seconds" in payload:
         elapsed = payload["elapsed_seconds"]
         if isinstance(elapsed, bool) or not isinstance(elapsed, (int, float)) or not math.isfinite(elapsed) or elapsed < 0:
@@ -390,7 +411,10 @@ def _validate_state_payload(payload: dict[str, Any]) -> None:
     checked_at = payload.get("checked_at")
     if checked_at is not None and (not isinstance(checked_at, str) or not _ISO_UTC.fullmatch(checked_at)):
         raise CaptchaGateError("malformed_captcha_state")
-    if "automation" in payload and payload["automation"] != "browser-native-wait-only":
+    if "automation" in payload and payload["automation"] not in {
+        "browser-native-wait-only",
+        "browser-native-then-agent-visual",
+    }:
         raise CaptchaGateError("malformed_captcha_state")
     if "claim_policy" in payload and payload["claim_policy"] != "best-effort/no-guaranteed-solve":
         raise CaptchaGateError("malformed_captcha_state")
@@ -543,12 +567,14 @@ def wait_for_captcha_clearance(
     latest: dict[str, Any] | None = None
     sticky_page_index = page_index
     sticky_page_key: str | None = None
-    if page_index < 0:
-        try:
-            previous = load_captcha_state(run_dir)
-        except CaptchaGateError:
-            previous = None
-        if previous is not None and previous.get("status") in {"managed_wait", "human_required", "timed_out"}:
+    native_attempts = 0
+    try:
+        previous = load_captcha_state(run_dir)
+    except CaptchaGateError:
+        previous = None
+    if previous is not None and previous.get("status") in {"managed_wait", "agent_action", "human_required", "timed_out"}:
+        native_attempts = min(1, _bounded_int(previous.get("native_attempts")))
+        if page_index < 0:
             prior_key = previous.get("page_key")
             prior_index = previous.get("page_index")
             if isinstance(prior_key, str):
@@ -565,6 +591,7 @@ def wait_for_captcha_clearance(
             page_key=sticky_page_key,
             persist=False,
         )
+        latest["native_attempts"] = native_attempts
         if _current_attempt_marker(run_dir) != attempt_marker:
             raise CaptchaGateError("captcha_attempt_changed")
         checks += 1
@@ -586,20 +613,25 @@ def wait_for_captcha_clearance(
             return result
         elapsed = monotonic() - started
         if elapsed >= timeout:
-            needs_human = latest.get("human_handoff") is True or (
+            needs_human = latest.get("human_handoff") is True
+            needs_agent = not needs_human and (latest.get("interactive") is True or (
                 latest.get("provider") == "Cloudflare managed challenge"
                 and _bounded_int(latest.get("visible_widget_count")) > 0
-            )
+            ))
             result = dict(latest)
             result.update(
                 {
-                    "status": "human_required" if needs_human else "timed_out",
+                    "status": "human_required" if needs_human else ("agent_action" if needs_agent else "timed_out"),
                     "checks": checks,
                     "elapsed_seconds": round(max(0.0, elapsed), 3),
                     "next_action": (
                         "solve_in_visible_trusted_browser_then_run_captcha_resume"
                         if needs_human
-                        else "inspect_protection_and_egress_before_retry"
+                        else (
+                            "attempt_safe_native_activation"
+                            if needs_agent
+                            else "inspect_protection_and_egress_before_retry"
+                        )
                     ),
                     "human_handoff": needs_human,
                 }
@@ -607,3 +639,192 @@ def wait_for_captcha_clearance(
             write_captcha_state(run_dir, result, expected_attempt_marker=attempt_marker)
             return result
         sleep(min(poll_interval, max(0.0, timeout - elapsed)))
+
+
+_ACTIVATION_FRAME_HOSTS = {
+    "recaptcha": ("google.com", "recaptcha.net"),
+    "hcaptcha": ("hcaptcha.com",),
+    "turnstile": ("challenges.cloudflare.com",),
+    "cloudflare": ("challenges.cloudflare.com",),
+}
+_ACTIVATION_SELECTORS = {
+    "recaptcha": "#recaptcha-anchor,[role='checkbox']",
+    "hcaptcha": "#checkbox,[role='checkbox']",
+    "turnstile": "input[type='checkbox'],[role='checkbox'],.ctp-checkbox-label",
+    "cloudflare": "input[type='checkbox'],[role='checkbox'],.ctp-checkbox-label",
+}
+
+
+def _host_allowed(host: str, suffixes: tuple[str, ...]) -> bool:
+    normalized = host.lower().rstrip(".")
+    return any(normalized == suffix or normalized.endswith(f".{suffix}") for suffix in suffixes)
+
+
+def _activate_with_playwright(config: RelayConfig, page_key: str, provider: str | None) -> dict[str, Any]:
+    provider_key = next((key for key, label in _PROVIDER_LABELS.items() if label == provider), None)
+    if provider_key is None:
+        return {"attempted": False, "reason_code": "provider_not_supported"}
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:
+        raise CaptchaGateError("playwright_unavailable") from exc
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.connect_over_cdp(config.cdp_url)
+            pages = [page for context in browser.contexts for page in context.pages]
+            page = next(
+                (
+                    candidate
+                    for candidate in pages
+                    if secrets.compare_digest(_page_target_key(candidate.context, candidate), page_key)
+                ),
+                None,
+            )
+            if page is None:
+                raise CaptchaGateError("captcha_page_target_changed")
+            candidates: list[Any] = []
+            suffixes = _ACTIVATION_FRAME_HOSTS[provider_key]
+            selector = _ACTIVATION_SELECTORS[provider_key]
+            for frame in page.frames:
+                try:
+                    from urllib.parse import urlsplit
+
+                    host = urlsplit(frame.url).hostname or ""
+                except ValueError:
+                    continue
+                if not _host_allowed(host, suffixes):
+                    continue
+                locator = frame.locator(selector)
+                for index in range(min(locator.count(), 4)):
+                    item = locator.nth(index)
+                    if item.is_visible():
+                        candidates.append(item)
+            if len(candidates) != 1:
+                return {
+                    "attempted": False,
+                    "reason_code": "activation_candidate_not_unique",
+                    "candidate_count": min(len(candidates), 4),
+                }
+            candidates[0].click(timeout=5_000)
+            page.wait_for_timeout(750)
+            return {"attempted": True, "reason_code": "safe_activation_clicked"}
+    except CaptchaGateError:
+        raise
+    except Exception as exc:
+        raise CaptchaGateError(f"captcha_native_activation_failed:{type(exc).__name__}") from exc
+
+
+def attempt_safe_captcha_activation(
+    config: RelayConfig,
+    run_dir: Path,
+    *,
+    activator: Callable[[RelayConfig, str, str | None], dict[str, Any]] = _activate_with_playwright,
+    inspector: Callable[..., dict[str, Any]] = inspect_captcha_gate,
+) -> dict[str, Any]:
+    state = load_captcha_state(run_dir)
+    if state is None or state.get("status") not in {"agent_action", "managed_wait"}:
+        raise CaptchaGateError("captcha_native_activation_not_ready")
+    if _bounded_int(state.get("native_attempts")) >= 1:
+        result = dict(state)
+        result.update(
+            {
+                "status": "agent_action",
+                "next_action": "capture_and_solve_visually",
+                "human_handoff": False,
+                "native_activation": "already_attempted",
+            }
+        )
+        write_captcha_state(run_dir, result)
+        return {
+            "status": "agent_action",
+            "attempted": False,
+            "reason_code": "safe_activation_already_attempted",
+            "next_action": "capture_and_solve_visually",
+            "human_handoff": False,
+            "effect_state": "succeeded",
+        }
+    page_key = state.get("page_key")
+    if not isinstance(page_key, str):
+        raise CaptchaGateError("captcha_page_identity_unavailable")
+    operation = begin_operation(
+        run_dir,
+        "captcha.native_activation",
+        effect_class="browser-state",
+        context={"page_key": page_key, "provider": state.get("provider") or "unknown"},
+    )
+    try:
+        operation.mark_dispatched()
+        activation = activator(config, page_key, state.get("provider"))
+        if not isinstance(activation, dict) or type(activation.get("attempted")) is not bool:
+            raise CaptchaGateError("captcha_native_activation_invalid_result")
+        inspected = inspector(config, run_dir, page_index=-1, page_key=page_key, persist=False)
+        result = dict(inspected)
+        if inspected.get("status") == "clear":
+            result.update({"status": "cleared", "next_action": "rerun_or_continue_task", "human_handoff": False})
+        elif not activation["attempted"]:
+            result.update({"status": "agent_action", "next_action": "capture_and_solve_visually", "human_handoff": False})
+        else:
+            result.update({"status": "managed_wait", "next_action": "wait_for_browser_native_clearance", "human_handoff": False})
+        result["native_attempts"] = 1
+        write_captcha_state(run_dir, result)
+        operation.finish(
+            "succeeded",
+            context={"page_key": page_key, "provider": state.get("provider") or "unknown"},
+        )
+        return {
+            "status": result["status"],
+            "attempted": activation["attempted"],
+            "reason_code": activation.get("reason_code"),
+            "next_action": result["next_action"],
+            "human_handoff": False,
+            "effect_state": "succeeded",
+        }
+    except Exception:
+        if not operation.finished:
+            operation.fail_from_exception("captcha_native_activation_error")
+        raise
+
+
+def autonomously_progress_captcha(
+    config: RelayConfig,
+    run_dir: Path,
+    *,
+    timeout: float = 30,
+    page_index: int = -1,
+    activator: Callable[[RelayConfig, str, str | None], dict[str, Any]] = _activate_with_playwright,
+    inspector: Callable[..., dict[str, Any]] = inspect_captcha_gate,
+    sleep: Callable[[float], None] = time.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> dict[str, Any]:
+    initial = inspector(config, run_dir, page_index=page_index, persist=True)
+    if initial["status"] == "clear":
+        return {**initial, "status": "cleared", "next_action": "rerun_or_continue_task", "human_handoff": False}
+    if initial["status"] == "managed_wait":
+        waited = wait_for_captcha_clearance(
+            config,
+            run_dir,
+            timeout=timeout,
+            page_index=page_index,
+            inspector=inspector,
+            sleep=sleep,
+            monotonic=monotonic,
+        )
+        if waited["status"] in {"cleared", "timed_out"}:
+            return waited
+    activated = attempt_safe_captcha_activation(
+        config,
+        run_dir,
+        activator=activator,
+        inspector=inspector,
+    )
+    if activated["status"] == "cleared" or not activated["attempted"]:
+        return activated
+    return wait_for_captcha_clearance(
+        config,
+        run_dir,
+        timeout=min(timeout, 30),
+        page_index=page_index,
+        inspector=inspector,
+        sleep=sleep,
+        monotonic=monotonic,
+    )
