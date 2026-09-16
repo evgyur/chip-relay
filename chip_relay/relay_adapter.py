@@ -7,10 +7,18 @@ from typing import Any
 from .agent_loop import run_agent_loop
 from .benchmark import compare_results, gate_results, read_result
 from .benchmark_runner import run_benchmark
-from .captcha import captcha_summary, inspect_captcha_gate, wait_for_captcha_clearance
+from .captcha import (
+    attempt_safe_captcha_activation,
+    autonomously_progress_captcha,
+    captcha_summary,
+    inspect_captcha_gate,
+    wait_for_captcha_clearance,
+)
 from .captcha_visual import apply_captcha_visual_actions, capture_captcha_visual, parse_visual_points
 from .config import RelayConfig
 from .hermes_context import hermes_task_context
+from .human_handoff import KINDS, REASON_CODES, cancel_handoff, handoff_summary, request_handoff, resolve_handoff
+from .operation_audit import audit_summary
 from .recipes import list_recipes, load_recipe, pack_run, parse_params, prepare_recipe_run
 from .reports import artifacts_report, evidence_report
 from .verifier import verify_run
@@ -193,7 +201,7 @@ def relay_text_response(config: RelayConfig, text: str) -> RelayAdapterResult:
 
 def _task_response(config: RelayConfig, tokens: list[str]) -> RelayAdapterResult:
     if not tokens:
-        return _fail("usage", "usage: /relay task <init|context|verify|show|artifacts|protection|captcha|run|loop|pack>", command="task")
+        return _fail("usage", "usage: /relay task <init|context|verify|show|artifacts|protection|captcha|handoff|audit|run|loop|pack>", command="task")
     action = tokens[0]
     if action == "init":
         if len(tokens) < 2:
@@ -256,6 +264,18 @@ def _task_response(config: RelayConfig, tokens: list[str]) -> RelayAdapterResult
         except ValueError as exc:
             gate = str(exc).split(":", 1)[0] or "captcha_command_failed"
             return _fail(gate, str(exc), command="task.captcha")
+    if action == "handoff":
+        try:
+            return _task_handoff_response(config, tokens[1:])
+        except ValueError as exc:
+            gate = str(exc).split(":", 1)[0] or "handoff_command_failed"
+            return _fail(gate, str(exc), command="task.handoff")
+    if action == "audit":
+        if len(tokens) != 3 or tokens[2] != "show":
+            return _fail("usage", "usage: /relay task audit <run_id> show", command="task.audit")
+        run_dir = resolve_run(config, tokens[1])
+        summary = audit_summary(run_dir)
+        return _ok("task.audit.show", {"status": summary["status"], "run_id": run_dir.name, "audit": summary})
     if action == "run":
         if len(tokens) != 2:
             return _fail("usage", "usage: /relay task run <run_id>", command="task.run")
@@ -319,12 +339,101 @@ def _task_protection_response(config: RelayConfig, tokens: list[str]) -> RelayAd
     return _fail("usage", usage, command="task.protection")
 
 
+def _task_handoff_response(config: RelayConfig, tokens: list[str]) -> RelayAdapterResult:
+    usage = "usage: /relay task handoff <run_id> <request|resolve|cancel|show>"
+    if len(tokens) < 2:
+        return _fail("usage", usage, command="task.handoff")
+    run_dir = resolve_run(config, tokens[0])
+    action = tokens[1]
+    if action == "show" and len(tokens) == 2:
+        payload = handoff_summary(run_dir)
+    elif action in {"resolve", "cancel"} and len(tokens) == 3:
+        payload = (
+            resolve_handoff(run_dir, tokens[2])
+            if action == "resolve"
+            else cancel_handoff(run_dir, tokens[2])
+        )
+    elif action == "request":
+        values: dict[str, str] = {}
+        index = 2
+        while index < len(tokens):
+            if index + 1 >= len(tokens) or tokens[index] not in {
+                "--kind",
+                "--reason-code",
+                "--timeout",
+                "--page-key",
+                "--provider",
+            }:
+                return _fail("usage", usage, command="task.handoff")
+            values[tokens[index]] = tokens[index + 1]
+            index += 2
+        kind = values.get("--kind")
+        reason_code = values.get("--reason-code")
+        if kind not in KINDS or reason_code not in REASON_CODES:
+            return _fail("usage", "known --kind and --reason-code are required", command="task.handoff")
+        try:
+            timeout = float(values.get("--timeout", "600"))
+        except ValueError:
+            return _fail("usage", "--timeout must be numeric", command="task.handoff")
+        payload = request_handoff(
+            run_dir,
+            kind=kind,
+            reason_code=reason_code,
+            timeout_seconds=timeout,
+            page_key=values.get("--page-key"),
+            provider=values.get("--provider"),
+        )
+    else:
+        return _fail("usage", usage, command="task.handoff")
+    return _ok(f"task.handoff.{action}", {"status": payload["status"], "run_id": run_dir.name, "handoff": payload})
+
+
 def _task_captcha_response(config: RelayConfig, tokens: list[str]) -> RelayAdapterResult:
-    usage = "usage: /relay task captcha <run_id> <inspect|wait|resume|capture|act|show>"
+    usage = "usage: /relay task captcha <run_id> <auto|native|inspect|wait|resume|capture|act|show>"
     if len(tokens) < 2:
         return _fail("usage", usage, command="task.captcha")
     run_dir = resolve_run(config, tokens[0])
     action = tokens[1]
+    if action in {"auto", "native"}:
+        timeout = 30.0
+        page_index = -1
+        index = 2
+        while index < len(tokens):
+            if index + 1 >= len(tokens):
+                return _fail("usage", usage, command="task.captcha")
+            flag, value = tokens[index], tokens[index + 1]
+            if flag == "--timeout" and action == "auto":
+                try:
+                    timeout = float(value)
+                except ValueError:
+                    return _fail("usage", "--timeout must be numeric", command="task.captcha")
+            elif flag == "--page-index":
+                try:
+                    page_index = int(value)
+                except ValueError:
+                    return _fail("usage", "--page-index must be an integer", command="task.captcha")
+            else:
+                return _fail("usage", usage, command="task.captcha")
+            index += 2
+        if action == "auto":
+            captcha = autonomously_progress_captcha(config, run_dir, timeout=timeout, page_index=page_index)
+        else:
+            inspected = inspect_captcha_gate(config, run_dir, page_index=page_index)
+            captcha = (
+                {**inspected, "status": "cleared", "next_action": "rerun_or_continue_task"}
+                if inspected["status"] == "clear"
+                else attempt_safe_captcha_activation(config, run_dir)
+            )
+        return RelayAdapterResult(
+            1 if captcha["status"] == "timed_out" else 0,
+            {
+                "schema": SCHEMA,
+                "command": f"task.captcha.{action}",
+                "status": captcha["status"],
+                "run_id": run_dir.name,
+                "captcha": captcha,
+            },
+        )
     if action == "capture" and len(tokens) == 2:
         visual = capture_captcha_visual(config, run_dir)
         return _ok(

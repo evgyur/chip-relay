@@ -16,11 +16,14 @@ from .capabilities import (
     normalize_relative_fetch_url,
     validate_response_origin,
 )
+from .operation_audit import begin_operation
 from .workspace import remove_private_body_artifact, write_private_body_artifact
 
 
 class BrowserFetchError(RuntimeError):
-    pass
+    def __init__(self, code: str, *, effect_state: str = "failed") -> None:
+        super().__init__(code)
+        self.effect_state = effect_state
 
 
 _FETCH_LOCK = threading.Lock()
@@ -175,10 +178,18 @@ def browser_native_fetch(
     except (CapabilityContractError, AttributeError, TypeError) as exc:
         raise _error(str(exc) or "fetch_request") from exc
 
+    operation = begin_operation(
+        run_dir,
+        "browser.native_fetch",
+        effect_class="external",
+        context={"origin": expected_origin},
+    )
     if not _FETCH_LOCK.acquire(blocking=False):
+        operation.finish("failed", error_class="fetch_concurrency", context={"origin": expected_origin})
         raise _error("fetch_concurrency")
     try:
         try:
+            operation.mark_dispatched()
             payload = page.evaluate(
                 _BROWSER_FETCH_SCRIPT,
                 {
@@ -213,6 +224,7 @@ def browser_native_fetch(
                 body_handle=handle,
             )
             record_browser_fetch_artifact(run_dir, metadata.as_public_dict())
+            operation.finish("succeeded", context={"origin": expected_origin})
             return metadata
         except Exception as exc:
             if handle is not None:
@@ -223,5 +235,11 @@ def browser_native_fetch(
             if isinstance(exc, BrowserFetchError):
                 raise
             raise _error("fetch_artifact") from exc
+    except Exception as exc:
+        if not operation.finished:
+            operation.fail_from_exception("browser_native_fetch_error")
+        if isinstance(exc, BrowserFetchError) and operation.dispatched:
+            exc.effect_state = "unknown"
+        raise
     finally:
         _FETCH_LOCK.release()
