@@ -165,7 +165,8 @@ class BenchmarkContractTests(unittest.TestCase):
                 suite_id="chip-relay-public-detectors",
             ),
         )
-        self.assertEqual(public.status, "passed")
+        self.assertEqual(public.status, "not_run")
+        self.assertEqual(public.failed_gate, "external_diagnostic_only")
 
     def test_missing_fingerprint_check_is_coverage_regression(self) -> None:
         candidate = result("candidate")

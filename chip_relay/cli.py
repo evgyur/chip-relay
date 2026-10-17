@@ -190,7 +190,7 @@ def build_parser() -> argparse.ArgumentParser:
         dest="backends",
     )
     stealth_benchmark.add_argument("--require-backend", action="append", default=[])
-    stealth_benchmark.add_argument("--suite", choices=["local", "public-detectors"], default="local")
+    stealth_benchmark.add_argument("--suite", choices=["local", "public-detectors", "tls-fingerprint"], default="local")
     stealth_benchmark.add_argument("--repeat", type=int, choices=[1, 2, 3], default=1)
     stealth_benchmark.add_argument("--preset", choices=["normal", "strict", "cf-sensitive"], default="normal")
     stealth_benchmark.add_argument("--output")

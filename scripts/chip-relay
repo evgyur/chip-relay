@@ -67,7 +67,7 @@ Usage:
   chip-relay recipe list|show|run ...
   chip-relay cleanup [--execute]
   chip-relay stealth doctor [--preset normal|strict|cf-sensitive] [--sample-json file]
-  chip-relay stealth benchmark [--backend active|chromium|cloakbrowser|browseros] [--suite local|public-detectors]
+  chip-relay stealth benchmark [--backend active|chromium|cloakbrowser|browseros] [--suite local|public-detectors|tls-fingerprint]
   chip-relay stealth compare|gate --baseline FILE --candidate FILE
   chip-relay doctor [webwright|playwright]
   chip-relay status|doctor|tabs|health|kill

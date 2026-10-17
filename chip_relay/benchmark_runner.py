@@ -27,19 +27,21 @@ from .benchmark import (
     validate_result,
 )
 from .config import RelayConfig
+from .benchmark_probes import INPUT_HTML, INIT_HTML, INIT_SCRIPT, behavior_status, run_input_probe, run_init_probe, tls_observation
 from .stealth import FINGERPRINT_JS, classify_challenge, evaluate_fingerprint
 
-SUITE_VERSION = "1"
+SUITE_VERSION = "2"
 PUBLIC_DETECTOR_CASES = (
     ("rebrowser-bot-detector", "https://bot-detector.rebrowser.net/"),
 )
 _CASE_PRECEDENCE = {
+    "not_run": 7,
     "error": 6,
     "blocked": 5,
     "captcha/manual": 4,
     "needs_proxy": 3,
+    "needs_attention": 3,
     "passed": 2,
-    "not_run": 1,
 }
 
 
@@ -49,6 +51,16 @@ class BenchmarkRunError(ValueError):
 
 class _FixtureHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
+        path = urlparse(self.path).path
+        if path in {"/input-events", "/init-script"}:
+            encoded = (INPUT_HTML if path == "/input-events" else INIT_HTML).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(encoded)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(encoded)
+            return
         status = 200
         title = "chip-relay clean fixture"
         body = "benchmark fixture ready"
@@ -140,22 +152,30 @@ def _suite_cases(suite: str, local_base: str | None) -> tuple[tuple[str, str], .
             ("clean", f"{local_base}/clean"),
             ("captcha", f"{local_base}/captcha"),
             ("blocked", f"{local_base}/blocked"),
+            ("input-events", f"{local_base}/input-events"),
+            ("init-script", f"{local_base}/init-script"),
         )
     if suite == "public-detectors":
         return PUBLIC_DETECTOR_CASES
+    if suite == "tls-fingerprint":
+        return (("tls-protocol", "https://tls.peet.ws/api/all"),)
     raise BenchmarkRunError("benchmark_suite_unknown")
 
 
 def _normalize_checks(evaluation: dict[str, Any]) -> list[dict[str, object]]:
     checks = evaluation.get("checks") or []
     return [
-        {"name": str(item.get("name") or "unknown"), "ok": bool(item.get("ok"))}
+        {"name": item["name"], "ok": item["ok"]}
         for item in checks
-        if isinstance(item, dict)
+        if isinstance(item, dict) and isinstance(item.get("name"), str) and type(item.get("ok")) is bool
     ]
 
 
-def _classify_case(*, response_status: int | None, title: str, url: str, text: str, evaluation: dict[str, Any]) -> str:
+def _page_status(*, response_status: int | None, title: str, url: str, text: str) -> str:
+    if response_status in {403, 429}:
+        return "blocked"
+    if "captcha" in (title + " " + text).lower() or "turnstile" in (title + " " + text).lower():
+        return "captcha/manual"
     challenge = classify_challenge({
         "status": response_status,
         "title": title,
@@ -163,9 +183,32 @@ def _classify_case(*, response_status: int | None, title: str, url: str, text: s
         "text": text[:8000],
     })
     status = str(challenge.get("status") or "not_run")
-    if status == "not_run":
-        return "passed" if evaluation.get("status") == "ok" else "passed"
+    if status in {"not_run", "passed"}:
+        if response_status is None:
+            return "not_run"
+        return "accessible" if 200 <= response_status < 400 else "error"
     return status
+
+
+def _fingerprint_status(evaluation: dict[str, Any]) -> str:
+    checks = _normalize_checks(evaluation)
+    required = {item["name"] for item in evaluate_fingerprint({"webdriver": True})["checks"]}
+    if evaluation.get("status") not in {"ok", "needs_attention"} or len(checks) != len(required) or {item["name"] for item in checks} != required:
+        return "not_run"
+    return "passed" if evaluation.get("status") == "ok" and all(item["ok"] for item in checks) else "needs_attention"
+
+
+def _classify_case(*, response_status: int | None, title: str, url: str, text: str, evaluation: dict[str, Any]) -> str:
+    page_status = _page_status(response_status=response_status, title=title, url=url, text=text)
+    return _fingerprint_status(evaluation) if page_status == "accessible" else page_status
+
+
+def _aggregate_attempts(attempts: list[dict[str, Any]], field: str) -> list[dict[str, Any]]:
+    names = sorted({check["name"] for item in attempts for check in item.get(field, [])})
+    return [{"name": name, "ok": all(
+        any(check["name"] == name and check["ok"] is True for check in item.get(field, []))
+        for item in attempts
+    )} for name in names]
 
 
 def _run_backend_probe(
@@ -204,13 +247,26 @@ def _run_backend_probe(
                             page = context.new_page()
                             started = time.monotonic()
                             try:
+                                if name == "init-script":
+                                    page.add_init_script(INIT_SCRIPT)
                                 response = page.goto(target, wait_until="domcontentloaded", timeout=20_000)
                                 raw_sample = page.evaluate(FINGERPRINT_JS)
                                 if not isinstance(raw_sample, dict):
                                     raise BenchmarkRunError("benchmark_fingerprint_invalid")
                                 evaluation = evaluate_fingerprint(raw_sample)
                                 title = page.title()[:512]
-                                text = page.locator("body").inner_text(timeout=2_000)[:8000]
+                                text = page.locator("body").inner_text(timeout=2_000)[:262144 if suite == "tls-fingerprint" else 8000]
+                                page_status = _page_status(response_status=response.status if response is not None else None,
+                                                           title=title, url=page.url, text=text)
+                                behavior_checks = []
+                                evidence = {}
+                                if page_status == "accessible":
+                                    if name == "input-events":
+                                        behavior_checks = run_input_probe(page)
+                                    elif name == "init-script":
+                                        behavior_checks = run_init_probe(page, target)
+                                    elif suite == "tls-fingerprint":
+                                        behavior_checks, evidence = tls_observation(text)
                                 elapsed_ms = max(0, round((time.monotonic() - started) * 1000))
                                 status = _classify_case(
                                     response_status=response.status if response is not None else None,
@@ -219,15 +275,31 @@ def _run_backend_probe(
                                     text=text,
                                     evaluation=evaluation,
                                 )
+                                behavior = behavior_status(name, behavior_checks)
+                                if page_status == "accessible":
+                                    if suite == "public-detectors" or behavior == "not_run":
+                                        status = "not_run"
+                                    elif status == "passed" and behavior == "needs_attention":
+                                        status = "needs_attention"
                                 item = {
                                     "status": status,
+                                    "page_status": page_status,
+                                    "fingerprint_status": _fingerprint_status(evaluation),
+                                    "behavior_status": behavior,
+                                    "behavior_checks": behavior_checks,
+                                    "protocol_evidence": evidence,
                                     "elapsed_ms": elapsed_ms,
                                     "fingerprint_checks": _normalize_checks(evaluation),
                                     "fingerprint_snapshot_sha256": snapshot_sha256(raw_sample),
                                 }
-                            except (PlaywrightError, BenchmarkRunError) as exc:
+                            except (PlaywrightError, BenchmarkRunError, ValueError) as exc:
                                 item = {
                                     "status": "error",
+                                    "page_status": "error",
+                                    "fingerprint_status": "not_run",
+                                    "behavior_status": "not_run",
+                                    "behavior_checks": [],
+                                    "protocol_evidence": {},
                                     "elapsed_ms": max(0, round((time.monotonic() - started) * 1000)),
                                     "fingerprint_checks": [],
                                     "fingerprint_snapshot_sha256": snapshot_sha256({"error": exc.__class__.__name__}),
@@ -249,20 +321,15 @@ def _run_backend_probe(
     normalized_cases: list[dict[str, Any]] = []
     for name, attempts in aggregate.items():
         status = max((str(item["status"]) for item in attempts), key=lambda value: _CASE_PRECEDENCE.get(value, 0))
-        check_names = sorted({str(check["name"]) for item in attempts for check in item["fingerprint_checks"]})
-        checks = [
-            {
-                "name": check_name,
-                "ok": all(
-                    any(check["name"] == check_name and check["ok"] is True for check in item["fingerprint_checks"])
-                    for item in attempts
-                ),
-            }
-            for check_name in check_names
-        ]
+        checks = _aggregate_attempts(attempts, "fingerprint_checks")
         normalized_cases.append({
             "name": name,
             "status": status,
+            "page_status": max((item["page_status"] for item in attempts), key=lambda value: _CASE_PRECEDENCE.get(value, 0)),
+            "fingerprint_status": max((item["fingerprint_status"] for item in attempts), key=lambda value: _CASE_PRECEDENCE.get(value, 0)),
+            "behavior_status": max((item["behavior_status"] for item in attempts), key=lambda value: _CASE_PRECEDENCE.get(value, 0)),
+            "behavior_checks": _aggregate_attempts(attempts, "behavior_checks"),
+            "protocol_evidence": [item["protocol_evidence"] for item in attempts if item["protocol_evidence"]],
             "elapsed_ms": round(median(item["elapsed_ms"] for item in attempts)),
             "repeat": len(attempts),
             "fingerprint_checks": checks,
@@ -490,7 +557,7 @@ def run_benchmark(
         raise BenchmarkRunError("benchmark_active_must_be_exclusive")
     if not 1 <= repeat <= 3:
         raise BenchmarkRunError("benchmark_repeat_out_of_range")
-    if suite not in {"local", "public-detectors"}:
+    if suite not in {"local", "public-detectors", "tls-fingerprint"}:
         raise BenchmarkRunError("benchmark_suite_unknown")
     if preset not in {"normal", "strict", "cf-sensitive"}:
         raise BenchmarkRunError("benchmark_preset_unknown")

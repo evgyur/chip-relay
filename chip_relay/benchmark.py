@@ -17,6 +17,7 @@ LOCAL_LATENCY_ABSOLUTE_TOLERANCE_MS = 500
 LOCAL_LATENCY_MULTIPLIER = 3
 ALLOWED_CASE_STATUSES = {
     "passed",
+    "needs_attention",
     "captcha/manual",
     "blocked",
     "needs_proxy",
@@ -24,7 +25,7 @@ ALLOWED_CASE_STATUSES = {
     "error",
     "unavailable",
 }
-_REGRESSION_STATUSES = {"blocked", "captcha/manual", "error", "not_run", "unavailable"}
+_REGRESSION_STATUSES = {"blocked", "captcha/manual", "error", "not_run", "unavailable", "needs_attention", "needs_proxy"}
 
 
 class BenchmarkContractError(ValueError):
@@ -107,12 +108,23 @@ def validate_result(payload: object) -> dict[str, Any]:
             elapsed = case.get("elapsed_ms")
             if not isinstance(elapsed, int) or elapsed < 0:
                 raise BenchmarkContractError("benchmark_elapsed_invalid")
-            checks = case.get("fingerprint_checks")
-            if not isinstance(checks, list):
-                raise BenchmarkContractError("benchmark_checks_invalid")
-            for check in checks:
-                if not isinstance(check, dict) or not isinstance(check.get("name"), str) or not isinstance(check.get("ok"), bool):
-                    raise BenchmarkContractError("benchmark_check_invalid")
+            for field in ("fingerprint_checks", "behavior_checks"):
+                checks = case.get(field, [] if field == "behavior_checks" else None)
+                if not isinstance(checks, list):
+                    raise BenchmarkContractError("benchmark_checks_invalid")
+                names = set()
+                for check in checks:
+                    if not isinstance(check, dict) or not isinstance(check.get("name"), str) or not check["name"] or type(check.get("ok")) is not bool:
+                        raise BenchmarkContractError("benchmark_check_invalid")
+                    if check["name"] in names:
+                        raise BenchmarkContractError("benchmark_check_duplicate")
+                    names.add(check["name"])
+            if "page_status" in case and case["page_status"] not in (ALLOWED_CASE_STATUSES - {"passed", "needs_attention"}) | {"accessible"}:
+                raise BenchmarkContractError("benchmark_page_status_invalid")
+            if "fingerprint_status" in case and case["fingerprint_status"] not in {"passed", "needs_attention", "not_run"}:
+                raise BenchmarkContractError("benchmark_fingerprint_status_invalid")
+            if "behavior_status" in case and case["behavior_status"] not in {"passed", "needs_attention", "not_run", "not_applicable"}:
+                raise BenchmarkContractError("benchmark_behavior_status_invalid")
         if requested == "active" and backend.get("ephemeral_profile") is True:
             raise BenchmarkContractError("benchmark_active_profile_claim_invalid")
     if len(canonical_json_bytes(payload)) > MAX_RESULT_BYTES:
@@ -207,6 +219,13 @@ def compare_results(baseline: dict[str, Any], candidate: dict[str, Any]) -> dict
                 for check in sorted(set(old_checks) | set(new_checks))
                 if old_checks.get(check) != new_checks.get(check)
             ]
+            old_behavior = {item["name"]: item["ok"] for item in old.get("behavior_checks", [])}
+            new_behavior = {item["name"]: item["ok"] for item in new.get("behavior_checks", [])}
+            behavior_diffs = [
+                {"name": check, "before": old_behavior.get(check), "after": new_behavior.get(check)}
+                for check in sorted(set(old_behavior) | set(new_behavior))
+                if old_behavior.get(check) != new_behavior.get(check)
+            ]
             case_diffs.append({
                 "name": name,
                 "status": "compared",
@@ -216,8 +235,18 @@ def compare_results(baseline: dict[str, Any], candidate: dict[str, Any]) -> dict
                 "after_elapsed_ms": new["elapsed_ms"],
                 "elapsed_delta_ms": new["elapsed_ms"] - old["elapsed_ms"],
                 "fingerprint_check_diffs": check_diffs,
+                "behavior_check_diffs": behavior_diffs,
+                "dimension_diffs": [
+                    {"name": key, "before": old.get(key), "after": new.get(key)}
+                    for key in ("page_status", "fingerprint_status", "behavior_status", "protocol_evidence")
+                    if old.get(key) != new.get(key)
+                ],
             })
-        backend_diffs.append({"identity": identity, "status": "compared", "case_diffs": case_diffs})
+        environment_diffs = [{"name": key, "before": before.get(key), "after": after.get(key)}
+                             for key in ("browser", "preset", "headless", "proxy_configured", "ephemeral_profile")
+                             if before.get(key) != after.get(key)]
+        backend_diffs.append({"identity": identity, "status": "compared", "case_diffs": case_diffs,
+                              "environment_diffs": environment_diffs})
     return {
         "schema": COMPARE_SCHEMA,
         "suite_id": baseline["suite_id"],
@@ -234,10 +263,10 @@ def compare_results(baseline: dict[str, Any], candidate: dict[str, Any]) -> dict
 
 def gate_results(baseline: dict[str, Any], candidate: dict[str, Any]) -> GateResult:
     comparison = compare_results(baseline, candidate)
-    if comparison["suite_id"] == "chip-relay-public-detectors":
+    if comparison["suite_id"] in {"chip-relay-public-detectors", "chip-relay-tls-fingerprint"}:
         return GateResult(
-            status="passed",
-            failed_gate=None,
+            status="not_run",
+            failed_gate="external_diagnostic_only",
             regressions=(),
             comparison=comparison,
         )
@@ -286,6 +315,15 @@ def gate_results(baseline: dict[str, Any], candidate: dict[str, Any]) -> GateRes
                         "case": case["name"],
                         "check": check["name"],
                     })
+            for check in case["behavior_check_diffs"]:
+                if check["before"] is not None and check["after"] is None:
+                    regressions.append({"type": "coverage_regression", "backend": backend["identity"],
+                                        "case": case["name"], "check": check["name"]})
+            for dimension in case["dimension_diffs"]:
+                if dimension["name"] in {"page_status", "fingerprint_status", "behavior_status"} and dimension["before"] in {"accessible", "passed"} and dimension["after"] not in {"accessible", "passed"}:
+                    regressions.append({"type": "outcome_regression", "backend": backend["identity"],
+                                        "case": case["name"], "dimension": dimension["name"],
+                                        "before": dimension["before"], "after": dimension["after"]})
     baseline_backends = _backend_map(baseline)
     for identity, candidate_backend in _backend_map(candidate).items():
         baseline_backend = baseline_backends.get(identity)
@@ -305,6 +343,11 @@ def gate_results(baseline: dict[str, Any], candidate: dict[str, Any]) -> GateRes
                         "case": candidate_case["name"],
                         "check": check["name"],
                     })
+            baseline_behavior = {item["name"]: item["ok"] for item in baseline_case.get("behavior_checks", [])} if baseline_case else {}
+            for check in candidate_case.get("behavior_checks", []):
+                if check["ok"] is False and baseline_behavior.get(check["name"]) is not False:
+                    regressions.append({"type": "behavior_regression", "backend": identity,
+                                        "case": candidate_case["name"], "check": check["name"]})
     failed_gate = None
     if regressions:
         failed_gate = "fingerprint_regression" if any(item["type"] == "fingerprint_regression" for item in regressions) else str(regressions[0]["type"])
