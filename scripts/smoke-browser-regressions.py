@@ -25,6 +25,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--executable", required=True)
     parser.add_argument("--output-dir", required=True)
+    parser.add_argument("--probe-binding", action="store_true", help="Observe CDP binding persistence on a task-owned local page")
     args = parser.parse_args()
     executable = Path(args.executable).resolve(strict=True)
     output = Path(args.output_dir).resolve()
@@ -71,6 +72,8 @@ def main() -> None:
                 # Real negative controls: JavaScript click must not look like CDP input;
                 # a page without pre-document initialization must not pass the init oracle.
                 from playwright.sync_api import sync_playwright
+                binding_probe = None
+                context_cleanup = 'closed'
                 with local_fixture_server() as base, sync_playwright() as pw:
                     browser = pw.chromium.connect_over_cdp(cdp)
                     context = browser.new_context()
@@ -89,13 +92,27 @@ def main() -> None:
                         evaluation = evaluate_fingerprint(page.evaluate(FINGERPRINT_JS))
                         assert _classify_case(response_status=200, title=page.title(), url=page.url,
                             text="local fixture", evaluation=evaluation) == "needs_attention"
+                        if args.probe_binding:
+                            from chip_relay.cdp_binding_probe import probe_cdp_binding
+                            binding_probe = probe_cdp_binding(context.new_page(), base + "/clean", base + "/init-script")
                     finally:
-                        context.close()
+                        # All semantic assertions must finish before accepting an
+                        # already-closed disposable context. Never mask their error.
+                        if sys.exc_info()[0] is None:
+                            from playwright._impl._errors import TargetClosedError
+                            try:
+                                context.close()
+                            except TargetClosedError:
+                                if process.poll() is not None:
+                                    raise
+                                context_cleanup = 'already_closed'
                 receipt = {
                     "status": "verified", "package_root": str(ROOT),
                     "browser": runs[-1]["results"][0]["browser"],
                     "suite_version": runs[-1]["suite_version"], "local_only": True,
                     "gate_status": gated.status,
+                    "cdp_binding_probe": binding_probe,
+                    "disposable_context_cleanup": context_cleanup,
                     "negative_controls": {"js_click_rejected": True, "missing_init_rejected": True,
                                           "detected_webdriver_not_passed": True},
                     "cases": [{k: case[k] for k in ("name", "status", "page_status", "fingerprint_status", "behavior_checks", "repeat")}

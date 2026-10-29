@@ -87,3 +87,26 @@ The local fixture implementation is original. Test categories were informed by
 [Stealth Browser MCP](https://github.com/vibheksoni/stealth-browser-mcp), MIT,
 reviewed at `ba95cca933c8e90bfeaa515c1d05dad2927794e6`; its lifecycle code and
 JavaScript-click fallback were not imported.
+
+## CDP binding compatibility (explicit observation)
+
+Add `--probe-binding` to the disposable smoke command to measure
+`Runtime.addBinding` before navigation, after a new document, and after reload.
+Every stage checks both function availability and actual `Runtime.bindingCalled`
+event delivery. The probe is restricted to the same exact loopback fixture and
+never re-registers the binding or injects an init-script workaround.
+
+Its `cdp_binding_probe.status` is separate from the existing local regression
+gate: `needs_attention` is a real compatibility finding, not a passed test or
+clearance claim. The top-level smoke verifies its own checks and completed
+observation, not that the engine passed this optional compatibility probe.
+See upstream [issue #632](https://github.com/CloakHQ/CloakBrowser/issues/632).
+
+Production relay source does not directly call this raw binding mechanism or
+`expose_binding`/`expose_function`. This is not a proof about every third-party
+library internals or future workflow. Do not install a workaround or change the
+browser engine merely because the standalone probe finds it broken. First
+identify an actual consumer and an affected workflow.
+The disposable harness accepts an already-closed context only after every
+semantic assertion completed and its owned browser process is still alive;
+it never suppresses a failed test, protocol operation, or unexpected exit.
