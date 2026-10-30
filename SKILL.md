@@ -154,6 +154,18 @@ Production adapter rules:
 - `scripts/chip-relay-agent-example` is a deterministic public-safe external-agent example for loop smoke tests; it is not a provider integration.
 - Run IDs must not contain path components or escape `runs_dir`; every task run/verify increments a durable attempt ID, verification must require fresh artifacts from that attempt, and browser cookie/profile dumps must fail hygiene. Linux execution/manifest serialization also uses a non-replaceable abstract Unix-socket authority; malformed execution records fail closed, and only a missing record receives legacy generation-zero migration.
 
+## Offline fingerprint coherence
+
+For a no-browser, no-network consistency check of minimized desktop observations,
+use [offline fingerprint coherence](references/fingerprint-coherence.md):
+
+```bash
+python -m chip_relay.fingerprint_coherence tests/fixtures/fingerprint-desktop-v1.json
+```
+
+Missing coverage never passes. The output contains verdicts only, not source
+values. This does not inject fingerprints or certify a live browser or stealth.
+
 ## Output Contract
 
 When using this skill, return compact operator evidence:
