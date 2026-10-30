@@ -18,6 +18,13 @@ It is designed to be copied into a Hermes skill directory or used standalone fro
 - no browser profile data
 - no downloaded browser binaries
 
+## Optional attach-only routing
+
+For site/workflow/account/network contracts on an already owned browser, see
+[the optional attach-only library](docs/attach-routing.md). It adds private selection
+pins, owner/network gates and default-off humanized input without changing this
+repo's existing launcher or publishing any runtime/account configuration.
+
 ## Install CloakBrowser path
 
 ```bash
