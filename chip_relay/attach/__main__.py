@@ -84,6 +84,17 @@ def main(argv=None):
             code = 0
         print(json.dumps(result))
         return code
+    except ImportError:
+        print(
+            json.dumps(
+                {
+                    "status": "blocked",
+                    "fallback": False,
+                    "failed_gate": "attach_dependency_unavailable",
+                }
+            )
+        )
+        return 78
     except (BindingError, OSError, ValueError, KeyError, TypeError) as exc:
         # A local file/error can contain credentials or private page values.
         gate = str(exc).split(":", 1)[0] if isinstance(exc, BindingError) else ""

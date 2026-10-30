@@ -1,5 +1,6 @@
 import unittest
 import asyncio
+import importlib.util
 from types import SimpleNamespace as NS
 from unittest.mock import patch
 from chip_relay.attach.binding import BindingError
@@ -92,7 +93,10 @@ class HumanizeTests(unittest.TestCase):
     def test_default_off_does_not_patch_upstream_and_restores_closed_scope(self):
         page = Page()
         target = Locator(page)
-        with patch("cloakbrowser.human.patch_page") as backend:
+        with patch(
+            "chip_relay.attach.humanize.doctor",
+            side_effect=AssertionError("off must not initialize optional SDK"),
+        ) as backend:
             with humanize_page(page, expected_origin=page.url) as h:
                 h.click(target)
                 h.fill(target, "ordinary text")
@@ -102,6 +106,10 @@ class HumanizeTests(unittest.TestCase):
         with self.assertRaisesRegex(BindingError, "humanize_scope_closed"):
             h.click(target)
 
+    @unittest.skipUnless(
+        importlib.util.find_spec("cloakbrowser") is not None,
+        "optional humanize SDK not installed",
+    )
     def test_explicit_mode_disables_typos_and_marks_only_selected_page(self):
         page, other = Page(), Page()
         configs = []
@@ -122,6 +130,20 @@ class HumanizeTests(unittest.TestCase):
         self.assertEqual(page.focused, 1)
         self.assertEqual(other.focused, 0)
         self.assertEqual(configs[0].mistype_chance, 0)
+
+    def test_missing_optional_sdk_blocks_explicit_mode_without_input(self):
+        page = Page()
+        target = Locator(page)
+        with patch(
+            "chip_relay.attach.humanize.doctor", return_value={"status": "unavailable"}
+        ):
+            with self.assertRaises(BindingError):
+                with humanize_page(
+                    page, expected_origin=page.url, mode="careful"
+                ) as human:
+                    human.click(target)
+        self.assertEqual(target.calls, [])
+        self.assertEqual(page.focused, 0)
 
     def test_secret_ambiguous_and_wrong_page_targets_never_dispatch(self):
         page = Page()

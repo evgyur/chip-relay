@@ -12,6 +12,46 @@ from chip_relay.attach.runner import run_checked
 
 
 class CheckedRunnerTests(unittest.TestCase):
+    def test_cli_missing_optional_dependency_is_bounded_and_does_not_write(self):
+        import io
+        from contextlib import redirect_stdout
+        from chip_relay.attach.__main__ import main
+
+        out = io.StringIO()
+        with (
+            patch("chip_relay.attach.__main__.read_bindings", return_value=catalog()),
+            patch("chip_relay.attach.__main__.read_selection", return_value=pin()),
+            patch(
+                "chip_relay.attach.__main__.verify_binding",
+                return_value={"verified": True},
+            ),
+            patch(
+                "chip_relay.attach.__main__.probe",
+                side_effect=ModuleNotFoundError("private-module-detail"),
+            ),
+            patch("chip_relay.attach.__main__.write_selection") as writer,
+            redirect_stdout(out),
+        ):
+            code = main(
+                [
+                    "--binding",
+                    "/fixture/binding",
+                    "--selection",
+                    "/fixture/pin",
+                    "--session",
+                    "task-one",
+                    "network-check",
+                    "--write",
+                    "/fixture/new-pin",
+                ]
+            )
+        self.assertEqual(code, 78)
+        self.assertEqual(
+            json.loads(out.getvalue())["failed_gate"], "attach_dependency_unavailable"
+        )
+        self.assertNotIn("private-module-detail", out.getvalue())
+        writer.assert_not_called()
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)

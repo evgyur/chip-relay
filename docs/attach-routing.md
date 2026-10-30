@@ -140,6 +140,8 @@ python tests/test_public_hygiene.py
 ```
 
 The port keeps the routing/humanize regressions and adds public runner/CLI tests.
+The explicit SDK integration test skips when the optional SDK is not installed;
+default-off guards and missing-dependency failure paths remain covered.
 Private dispatcher, auth recipes, service wiring, machine paths, actual account
 assignments and installation receipts are deliberately excluded. Local fixture
 success must never be presented as access to a real provider account.
