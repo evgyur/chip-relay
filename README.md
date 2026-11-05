@@ -2,6 +2,10 @@
 
 Public-safe browser relay skill for agent automation.
 
+Optional Linux desktop companion: [guarded non-secret app/window snapshots and
+semantic clicks](docs/desktop-companion.md). This additive executor does not
+replace browser routing or manage any browser lifecycle.
+
 `chip-relay` launches a persistent local CDP browser and lets you switch between:
 
 - **CloakBrowser** — stealth patched Chromium for automation-heavy pages.
