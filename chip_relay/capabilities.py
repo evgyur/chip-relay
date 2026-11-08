@@ -254,6 +254,7 @@ class BrowserFetchMetadata:
     content_type: str
     content_length: int
     body_handle: str | None
+    effect_state: str = "succeeded"
 
     def __post_init__(self) -> None:
         if not 100 <= self.status <= 599:
@@ -269,6 +270,8 @@ class BrowserFetchMetadata:
             raise _contract_error("head_body_handle")
         if self.body_handle is not None and not _BODY_HANDLE.fullmatch(self.body_handle):
             raise _contract_error("body_handle")
+        if self.effect_state != "succeeded":
+            raise _contract_error("effect_state")
 
     def as_public_dict(self) -> dict[str, object]:
         return {
@@ -278,4 +281,5 @@ class BrowserFetchMetadata:
             "content_type": self.content_type,
             "content_length": self.content_length,
             "body_handle": self.body_handle,
+            "effect_state": self.effect_state,
         }

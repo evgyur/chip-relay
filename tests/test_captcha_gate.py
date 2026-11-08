@@ -72,7 +72,7 @@ def page_probe(
 
 
 class CaptchaGateTests(unittest.TestCase):
-    def test_classifier_separates_clear_managed_wait_and_human_handoff(self) -> None:
+    def test_classifier_keeps_interactive_challenges_with_the_agent(self) -> None:
         clear = classify_captcha_probe(
             page_probe(
                 {"recaptcha": True},
@@ -102,7 +102,7 @@ class CaptchaGateTests(unittest.TestCase):
         self.assertEqual(cloudflare_turnstile["status"], "managed_wait")
         self.assertEqual(cloudflare_turnstile["provider"], "Cloudflare managed challenge")
 
-        human = classify_captcha_probe(
+        agent = classify_captcha_probe(
             page_probe(
                 {"hcaptcha": True},
                 title="captcha",
@@ -111,9 +111,10 @@ class CaptchaGateTests(unittest.TestCase):
                 interactive=True,
             )
         )
-        self.assertEqual(human["status"], "human_required")
-        self.assertEqual(human["next_action"], "solve_in_visible_trusted_browser_then_resume")
-        self.assertIn("token injection", human["forbidden"])
+        self.assertEqual(agent["status"], "agent_action")
+        self.assertEqual(agent["next_action"], "attempt_safe_native_activation")
+        self.assertFalse(agent["human_handoff"])
+        self.assertIn("token injection", agent["forbidden"])
 
         hidden_pending = classify_captcha_probe(
             page_probe({"recaptcha": True}, response_fields=1)
@@ -287,7 +288,7 @@ class CaptchaGateTests(unittest.TestCase):
             self.assertNotIn("guaranteed", json.dumps(result).lower())
             self.assertNotIn("token", json.dumps(result).lower())
 
-    def test_visible_cloudflare_timeout_persists_human_handoff(self) -> None:
+    def test_visible_cloudflare_timeout_keeps_work_with_agent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = pathlib.Path(tmp)
             config = make_config(base)
@@ -321,12 +322,12 @@ class CaptchaGateTests(unittest.TestCase):
                 monotonic=clock.monotonic,
             )
             state = load_captcha_state(run.run_dir)
-            self.assertEqual(result["status"], "human_required")
-            self.assertTrue(result["human_handoff"])
+            self.assertEqual(result["status"], "agent_action")
+            self.assertFalse(result["human_handoff"])
             self.assertIsNotNone(state)
             assert state is not None
-            self.assertEqual(state["status"], "human_required")
-            self.assertTrue(state["human_handoff"])
+            self.assertEqual(state["status"], "agent_action")
+            self.assertFalse(state["human_handoff"])
 
     def test_state_summary_context_and_relay_show_are_metadata_only(self) -> None:
         sentinel = "SENTINEL_CAPTCHA_PRIVATE_991"

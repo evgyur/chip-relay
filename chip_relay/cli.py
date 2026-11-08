@@ -15,7 +15,13 @@ from .browser_use import (
     browser_use_summary,
     execute_browser_use,
 )
-from .captcha import captcha_summary, inspect_captcha_gate, wait_for_captcha_clearance
+from .captcha import (
+    attempt_safe_captcha_activation,
+    autonomously_progress_captcha,
+    captcha_summary,
+    inspect_captcha_gate,
+    wait_for_captcha_clearance,
+)
 from .captcha_visual import (
     apply_captcha_visual_actions,
     capture_captcha_visual,
@@ -24,8 +30,10 @@ from .captcha_visual import (
 from .cleanup import run_cleanup
 from .config import load_config
 from .hermes_context import hermes_task_context
+from .human_handoff import KINDS, REASON_CODES, cancel_handoff, handoff_summary, request_handoff, resolve_handoff
 from .init_scripts import add_init_script, list_init_scripts
 from .network import export_network_metadata, record_observation, search_observations
+from .operation_audit import audit_summary
 from .playwright_runner import doctor_webwright, run_final_script
 from .protection import (
     diagnose_run,
@@ -147,6 +155,11 @@ def build_parser() -> argparse.ArgumentParser:
     captcha_resume.add_argument("--poll-interval", type=float, default=2)
     captcha_resume.add_argument("--page-index", type=int, default=-1)
     captcha_sub.add_parser("capture")
+    captcha_native = captcha_sub.add_parser("native")
+    captcha_native.add_argument("--page-index", type=int, default=-1)
+    captcha_auto = captcha_sub.add_parser("auto")
+    captcha_auto.add_argument("--timeout", type=float, default=30)
+    captcha_auto.add_argument("--page-index", type=int, default=-1)
     captcha_act = captcha_sub.add_parser("act")
     captcha_act.add_argument("--point", action="append", required=True)
     captcha_act.add_argument("--confidence", type=float, required=True)
@@ -170,6 +183,26 @@ def build_parser() -> argparse.ArgumentParser:
     browser_use_execute.add_argument("--script", required=True)
     browser_use_execute.add_argument("--timeout", type=float, default=120)
     browser_use_sub.add_parser("show")
+
+    handoff = task_sub.add_parser("handoff")
+    handoff.add_argument("run")
+    handoff_sub = handoff.add_subparsers(dest="handoff_command", required=True)
+    handoff_request = handoff_sub.add_parser("request")
+    handoff_request.add_argument("--kind", choices=sorted(KINDS), required=True)
+    handoff_request.add_argument("--reason-code", choices=sorted(REASON_CODES), required=True)
+    handoff_request.add_argument("--timeout", type=float, default=600)
+    handoff_request.add_argument("--page-key")
+    handoff_request.add_argument("--provider")
+    handoff_resolve = handoff_sub.add_parser("resolve")
+    handoff_resolve.add_argument("handoff_id")
+    handoff_cancel = handoff_sub.add_parser("cancel")
+    handoff_cancel.add_argument("handoff_id")
+    handoff_sub.add_parser("show")
+
+    audit = task_sub.add_parser("audit")
+    audit.add_argument("run")
+    audit_sub = audit.add_subparsers(dest="audit_command", required=True)
+    audit_sub.add_parser("show")
 
     doctor = sub.add_parser("doctor")
     doctor.add_argument("topic", nargs="?", default="webwright", choices=["webwright", "playwright"])
@@ -338,6 +371,23 @@ def cmd_task_captcha(args: argparse.Namespace, config) -> int:
         payload = capture_captcha_visual(config, run_dir)
         emit({"status": payload["status"], "run_id": run_dir.name, "captcha_visual": payload}, json_mode=args.json_mode)
         return 0
+    if args.captcha_command == "native":
+        current = inspect_captcha_gate(config, run_dir, page_index=args.page_index)
+        if current["status"] == "clear":
+            payload = {**current, "status": "cleared", "next_action": "rerun_or_continue_task"}
+        else:
+            payload = attempt_safe_captcha_activation(config, run_dir)
+        emit({"status": payload["status"], "run_id": run_dir.name, "captcha": payload}, json_mode=args.json_mode)
+        return 0
+    if args.captcha_command == "auto":
+        payload = autonomously_progress_captcha(
+            config,
+            run_dir,
+            timeout=args.timeout,
+            page_index=args.page_index,
+        )
+        emit({"status": payload["status"], "run_id": run_dir.name, "captcha": payload}, json_mode=args.json_mode)
+        return 0 if payload["status"] != "timed_out" else 1
     if args.captcha_command == "act":
         points = parse_visual_points(args.point)
         payload = apply_captcha_visual_actions(config, run_dir, points, confidence=args.confidence)
@@ -370,6 +420,38 @@ def cmd_task_captcha(args: argparse.Namespace, config) -> int:
         emit({"status": payload["status"], "run_id": run_dir.name, "captcha": payload}, json_mode=args.json_mode)
         return 0
     raise SystemExit(f"unknown captcha command: {args.captcha_command}")
+
+
+def cmd_task_handoff(args: argparse.Namespace, config) -> int:
+    run_dir = resolve_run(config, args.run)
+    if args.handoff_command == "request":
+        payload = request_handoff(
+            run_dir,
+            kind=args.kind,
+            reason_code=args.reason_code,
+            timeout_seconds=args.timeout,
+            page_key=args.page_key,
+            provider=args.provider,
+        )
+    elif args.handoff_command == "resolve":
+        payload = resolve_handoff(run_dir, args.handoff_id)
+    elif args.handoff_command == "cancel":
+        payload = cancel_handoff(run_dir, args.handoff_id)
+    elif args.handoff_command == "show":
+        payload = handoff_summary(run_dir)
+    else:
+        raise SystemExit(f"unknown handoff command: {args.handoff_command}")
+    emit({"status": payload["status"], "run_id": run_dir.name, "handoff": payload}, json_mode=args.json_mode)
+    return 0
+
+
+def cmd_task_audit(args: argparse.Namespace, config) -> int:
+    run_dir = resolve_run(config, args.run)
+    if args.audit_command != "show":
+        raise SystemExit(f"unknown audit command: {args.audit_command}")
+    payload = audit_summary(run_dir)
+    emit({"status": payload["status"], "run_id": run_dir.name, "audit": payload}, json_mode=args.json_mode)
+    return 0
 
 
 def cmd_task(args: argparse.Namespace) -> int:
@@ -519,6 +601,10 @@ def cmd_task(args: argparse.Namespace) -> int:
         return cmd_task_init_script(args, config)
     if args.task_command == "browser-use":
         return cmd_task_browser_use(args, config)
+    if args.task_command == "handoff":
+        return cmd_task_handoff(args, config)
+    if args.task_command == "audit":
+        return cmd_task_audit(args, config)
     raise SystemExit(f"unknown task command: {args.task_command}")
 
 

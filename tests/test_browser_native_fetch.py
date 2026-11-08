@@ -16,6 +16,7 @@ from chip_relay.artifacts import list_browser_fetch_artifacts
 from chip_relay.browser_fetch import BrowserFetchError, browser_native_fetch
 from chip_relay.capabilities import BrowserFetchPolicy, CapabilityContractError
 from chip_relay.config import RelayConfig
+from chip_relay.operation_audit import audit_summary
 from chip_relay.playwright_runner import _run_final_script_locked, browser_fetch_for_current_run
 from chip_relay.reports import artifact_metadata
 from chip_relay.workspace import read_private_body_artifact, write_manifest
@@ -80,7 +81,9 @@ class BrowserNativeFetchTests(unittest.TestCase):
             self.assertNotIn("raw_body", serialized)
             self.assertNotIn("cookie", serialized.lower())
             self.assertEqual(public["status"], 200)
+            self.assertEqual(public["effect_state"], "succeeded")
             self.assertTrue(public["body_handle"].startswith("body-"))
+            self.assertEqual(audit_summary(run_dir)["terminal_counts"]["succeeded"], 1)
 
             token = result.body_handle.removeprefix("body-")
             body_path = run_dir / "artifacts" / "private" / "browser-fetch" / f"{token}.body"
@@ -106,8 +109,10 @@ class BrowserNativeFetchTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = self._run_dir(pathlib.Path(tmp))
             page = FakePage({"kind": "unsupported_type"})
-            with self.assertRaisesRegex(BrowserFetchError, "fetch_content_type"):
+            with self.assertRaisesRegex(BrowserFetchError, "fetch_content_type") as caught:
                 browser_native_fetch(page, run_dir, "/private")
+            self.assertEqual(caught.exception.effect_state, "unknown")
+            self.assertEqual(audit_summary(run_dir)["terminal_counts"]["unknown"], 1)
             script = page.calls[0][0]
             rejection_helper = script.split("const rejectResponse = async", 1)
             self.assertEqual(len(rejection_helper), 2)
@@ -289,6 +294,7 @@ class BrowserNativeFetchTests(unittest.TestCase):
                 mock.patch("chip_relay.playwright_runner.load_manifest", return_value=manifest),
                 mock.patch("chip_relay.playwright_runner.begin_execution_attempt", return_value=manifest),
                 mock.patch("chip_relay.playwright_runner.execution_marker", return_value={"attempt_id": "attempt-1"}),
+                mock.patch("chip_relay.playwright_runner.begin_operation"),
                 mock.patch("chip_relay.playwright_runner._update_run_manifest"),
                 mock.patch("chip_relay.playwright_runner.subprocess.run", side_effect=fake_run),
             ):
@@ -332,6 +338,7 @@ class BrowserNativeFetchTests(unittest.TestCase):
                 mock.patch("chip_relay.playwright_runner.load_manifest", return_value=manifest),
                 mock.patch("chip_relay.playwright_runner.begin_execution_attempt", return_value=manifest),
                 mock.patch("chip_relay.playwright_runner.execution_marker", return_value={"attempt_id": "attempt-1"}),
+                mock.patch("chip_relay.playwright_runner.begin_operation"),
                 mock.patch("chip_relay.playwright_runner._update_run_manifest"),
                 mock.patch("chip_relay.playwright_runner.proxy_auth_session", failed_proxy_session),
                 mock.patch("chip_relay.playwright_runner.subprocess.run", return_value=completed),

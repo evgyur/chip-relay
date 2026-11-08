@@ -27,6 +27,7 @@ from urllib.parse import urlsplit
 
 from .config import RelayConfig
 from .hygiene import redact_text
+from .operation_audit import begin_operation
 from .workspace import execution_run_lock
 
 SCHEMA = "chip-relay-browser-use-result-v1"
@@ -872,6 +873,7 @@ def execute_browser_use(
     command, runner = _command(config)
     started = time.monotonic()
     with execution_run_lock(run_dir):
+        operation = begin_operation(run_dir, "browser_use.execute", effect_class="browser-state")
         _invalidate_result(run_dir)
         isolation = _create_isolation(run_dir)
         env = _minimal_env(config, isolation)
@@ -879,6 +881,7 @@ def execute_browser_use(
         isolation_cleaned = False
         attestation: dict[str, Any] | None = None
         try:
+            operation.mark_dispatched()
             return_code, stdout, stderr, failure = _run_cli(
                 command,
                 source,
@@ -905,17 +908,20 @@ def execute_browser_use(
                 _cleanup_isolation(isolation)
                 isolation_cleaned = True
             status = "succeeded" if return_code == 0 and failure is None else "failed"
+            effect_state = "succeeded" if status == "succeeded" else "unknown"
+            failure_code = failure or (None if return_code == 0 else "browser_use_cli_exit")
             cdp_status = "isolated-daemon-cdp" if attestation is not None else "configured-command-unattested"
             result = {
                 "schema": SCHEMA,
                 "status": status,
+                "effect_state": effect_state,
                 "mode": MODE,
                 "cdp": cdp_status,
                 "runner": runner,
                 "script_sha256": script_sha256,
                 "policy_sha256": _sha256(json.dumps(policy, sort_keys=True, separators=(",", ":")).encode("utf-8")),
                 "exit_code": return_code,
-                "failure": failure or (None if return_code == 0 else "browser_use_cli_exit"),
+                "failure": failure_code,
                 "stdout": {"size_bytes": len(stdout), "sha256": _sha256(stdout)},
                 "stderr": {"size_bytes": len(stderr), "sha256": _sha256(stderr)},
                 "screenshot": screenshot,
@@ -930,6 +936,7 @@ def execute_browser_use(
                 "trust_boundary": "cooperative-policy/not-a-sandbox",
                 "network_boundary": "public-https-preflight/no-redirect-enforcement",
             }
+            operation.finish(effect_state, error_class=failure_code)
             encoded = (json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
             _atomic_write(run_dir / "results" / "browser-use" / "last.json", encoded)
             return result
@@ -939,6 +946,8 @@ def execute_browser_use(
                 daemon_closed = _shutdown_daemon(isolation, recovery_attestation)
             if daemon_closed and not isolation_cleaned:
                 _cleanup_isolation(isolation)
+            if not operation.finished:
+                operation.fail_from_exception("browser_use_execution_error")
 
 
 def _validate_stored_screenshot(run_dir: Path, payload: Any) -> None:
@@ -1024,6 +1033,7 @@ def _load_result(path: Path, *, run_dir: Path) -> dict[str, Any] | None:
         not isinstance(payload, dict)
         or payload.get("schema") != SCHEMA
         or payload.get("status") not in {"succeeded", "failed"}
+        or payload.get("effect_state") not in {"succeeded", "unknown"}
         or payload.get("mode") != MODE
         or not isinstance(payload.get("script_sha256"), str)
         or SHA256_PATTERN.fullmatch(payload["script_sha256"]) is None
@@ -1074,9 +1084,14 @@ def _load_result(path: Path, *, run_dir: Path) -> dict[str, Any] | None:
         "browser_use_daemon_cleanup_failed",
     }
     if payload["status"] == "succeeded":
-        if payload["exit_code"] != 0 or payload.get("failure") is not None or payload["daemon"].get("status") == "cleanup-failed":
+        if (
+            payload["effect_state"] != "succeeded"
+            or payload["exit_code"] != 0
+            or payload.get("failure") is not None
+            or payload["daemon"].get("status") == "cleanup-failed"
+        ):
             raise ValueError("browser_use_metadata")
-    elif payload.get("failure") not in known_failures:
+    elif payload.get("failure") not in known_failures or payload["effect_state"] != "unknown":
         raise ValueError("browser_use_metadata")
     if payload["daemon"].get("status") == "attested-and-closed" and (
         payload["daemon"].get("browser_kind") != "cdp" or payload["daemon"].get("probe") != "Browser.getVersion"
@@ -1113,6 +1128,7 @@ def browser_use_summary(run_dir: Path) -> dict[str, Any]:
     return {
         "schema": SUMMARY_SCHEMA,
         "status": payload["status"],
+        "effect_state": payload["effect_state"],
         "mode": MODE,
         "cdp": payload.get("cdp"),
         "runner": payload.get("runner"),

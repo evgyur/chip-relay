@@ -12,6 +12,7 @@ _ALLOWED_KEYS = {
     "content_type",
     "content_length",
     "body_handle",
+    "effect_state",
 }
 _MAX_BROWSER_FETCH_RECORDS = 256
 
@@ -22,6 +23,8 @@ def record_browser_fetch_artifact(run_dir: Path, metadata: dict[str, Any]) -> di
     handle = metadata.get("body_handle")
     if not isinstance(handle, str) and not (metadata.get("method") == "HEAD" and handle is None):
         raise ValueError("browser_fetch_metadata_handle")
+    if metadata.get("effect_state") != "succeeded":
+        raise ValueError("browser_fetch_metadata_effect_state")
     record = {"kind": "browser-fetch", "private": True, **metadata}
 
     def append(manifest: dict[str, Any]) -> None:
