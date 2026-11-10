@@ -91,8 +91,14 @@ def ensure_cdp(cdp_url: str) -> None:
 
 
 def run_final_script(run_dir: Path, *, config: RelayConfig, timeout: int = 180) -> RunResult:
+    if config.external_binding is not None:
+        from .binding import verify_binding
+        verify_binding(config.external_binding)
     with execution_run_lock(run_dir):
-        return _run_final_script_locked(run_dir, config=config, timeout=timeout)
+        result = _run_final_script_locked(run_dir, config=config, timeout=timeout)
+        if config.external_binding is not None:
+            verify_binding(config.external_binding)
+        return result
 
 
 def _run_final_script_locked(run_dir: Path, *, config: RelayConfig, timeout: int) -> RunResult:
@@ -115,6 +121,10 @@ def _run_final_script_locked(run_dir: Path, *, config: RelayConfig, timeout: int
     ):
         env.pop(secret_key, None)
     env["CHIP_RELAY_CDP_URL"] = config.cdp_url
+    if config.external_binding is not None:
+        env['RELAY_BOUND_ENTRY'] = json.dumps(config.external_binding)
+    else:
+        env.pop('RELAY_BOUND_ENTRY', None)
     env["CHIP_RELAY_RUN_DIR"] = str(run_dir)
     env["CHIP_RELAY_ATTEMPT_ID"] = str(execution_marker(manifest)["attempt_id"])
     package_root = str(Path(__file__).resolve().parents[1])

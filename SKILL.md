@@ -22,6 +22,12 @@ Use this skill when the user asks to:
 - run bounded read-only Browser Use CLI programs through Relay's loopback CDP with private-local evidence;
 - detect CAPTCHA gates, wait for browser-native clearance, capture an interactive challenge privately for trusted local vision, apply bounded normalized clicks, and resume without exposing response tokens.
 
+## Native swipe on a verified page
+
+For requested inertial scrolling, use `humanize_page(...).swipe(direction="up", distance=240, speed=1200, inertia=True)` on the explicitly selected page. See [page-input configuration](references/humanize.md) and [swipe contract and fixture](references/swipe.md). Directions describe finger motion; `up` scrolls content down. The adapter sends native CDP touch events and measures post-release movement/settling; it never fabricates inertia, changes device emulation or retries through another input backend.
+
+This is additive: existing supervisor commands and the desktop companion stay unchanged. Swipe input requires an exact externally verified owner/process/profile binding; live account checks remain separate. Default `mode="off"` needs Playwright but not the optional click/fill SDK. Do not publish runtime bindings, account catalogs, browser profiles, cookies or private receipts. A disposable fixture verifies mechanics, not provider login, physical touchpad input or absence of bans.
+
 ## Core model
 
 `chip-relay` is a small CDP supervisor around two browser paths:

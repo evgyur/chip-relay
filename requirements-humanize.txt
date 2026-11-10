@@ -1,0 +1,4 @@
+# Existing managed runtime pins; no browser binary installation.
+playwright==1.62.0
+websocket-client==1.9.2
+cloakbrowser @ git+https://github.com/CloakHQ/CloakBrowser.git@b1a00eda61efe71da2a1a38831fa6fe861f5d91d

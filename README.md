@@ -13,6 +13,28 @@ replace browser routing or manage any browser lifecycle.
 
 It is designed to be copied into a Hermes skill directory or used standalone from a cloned repo.
 
+## Native swipe with inertia
+
+The optional scoped page-input adapter supports `up/down/left/right` native touch
+swipes, bounded distance/speed, optional momentum and measured stopping. It needs
+an exact external owner/process/profile binding and the intended live account;
+it does not replace the existing supervisor or desktop companion.
+
+```python
+from chip_relay.humanize import humanize_page
+
+with humanize_page(selected_page, expected_origin=selected_origin,
+                   expected_account=expected_account,
+                   identity_check=read_and_verify_live_account) as human:
+    result = human.swipe(direction="up", distance=240, speed=1200, inertia=True)
+```
+
+Read [configuration and guards](references/humanize.md) and
+[swipe mechanics and disposable acceptance](references/swipe.md). Default-off
+click/fill mode uses native input and does not require the optional SDK. Fixture
+success is not provider-login proof or an anti-ban guarantee. No runtime account
+registry, profile, credential or private operator history is bundled.
+
 ## What this repo does not contain
 
 - no cookies
